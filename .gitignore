@@ -1,0 +1,15 @@
+bin/
+obj/
+
+# DLLs do jogo e de mods de terceiros, guardadas para auditoria local.
+# Nao entram no repositorio: assembly_valheim.dll e binario da Iron Gate.
+audit/*.dll
+
+# Pacotes publicados: vao para os Releases do GitHub, nao para o git.
+dist/*.zip
+dist/*.sha256
+
+# Saidas de smoke test local: logs de servidor (com SteamID64), mundos e listas.
+# Nao entram no repositorio, ainda mais sendo ele publico.
+smoke-data/
+smoke-data-*/
