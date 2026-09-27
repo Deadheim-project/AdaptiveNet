@@ -160,4 +160,9 @@ dotnet build .\AdaptiveNet.csproj -c Release
 ```
 
 O pacote e seu SHA-256 serão criados em `dist`. O script não instala nem inicia o servidor.
-## InstalaçãoPelo [DeadheimLauncher](https://github.com/Deadheim-project/Launcher), como mod obrigatório doservidor e dos clientes. Os releases deste repositório trazem o binário e o preset deconfiguração; o launcher baixa de lá pela versão fixada no manifest.
+
+## Instalação
+
+Pelo [DeadheimLauncher](https://github.com/Deadheim-project/Launcher), como mod obrigatório do
+servidor e dos clientes. Os releases deste repositório trazem o binário e o preset de
+configuração; o launcher baixa de lá pela versão fixada no manifest.
