@@ -166,7 +166,7 @@ namespace AdaptiveNet.Core
     /// </summary>
     public sealed class AdaptiveConnectionController
     {
-        private readonly AdaptiveControllerOptions _options;
+        private AdaptiveControllerOptions _options;
         private int _targetRate;
         private int _healthyDemandSamples;
         private double _baselinePing = -1d;
@@ -176,6 +176,22 @@ namespace AdaptiveNet.Core
             _options = options ?? throw new ArgumentNullException(nameof(options));
             _options.Validate();
             _targetRate = _options.InitialSendRateBytesPerSecond;
+        }
+
+        /// <summary>
+        /// Takes options reloaded from the cfg without forgetting what this connection has
+        /// learned: the ceiling it converged to and the ping baseline carry over, and the ceiling
+        /// is only pulled inside the new bounds. Starting over from the initial rate would make
+        /// every player re-climb for a minute each time an admin saves the file.
+        /// </summary>
+        public void UpdateOptions(AdaptiveControllerOptions options)
+        {
+            if (options == null) throw new ArgumentNullException(nameof(options));
+            options.Validate();
+            _options = options;
+            _targetRate = Math.Max(
+                _options.MinimumSendRateBytesPerSecond,
+                Math.Min(_options.MaximumSendRateBytesPerSecond, _targetRate));
         }
 
         public int TargetSendRateBytesPerSecond => _targetRate;

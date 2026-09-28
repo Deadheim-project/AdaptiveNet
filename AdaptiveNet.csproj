@@ -61,6 +61,17 @@
       <HintPath>$(ValheimManaged)\UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- ServerSync (src\ThirdParty\ConfigSync.cs) writes a version refusal onto the game's
+         connect-error panel, whose text is TextMeshPro (a UnityEngine.UI graphic). -->
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(ValheimManaged)\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(ValheimManaged)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.Runtime.Serialization" />
   </ItemGroup>
 
   <Target Name="VerifyValheimReferences" BeforeTargets="ResolveReferences">

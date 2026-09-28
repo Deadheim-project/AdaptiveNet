@@ -101,9 +101,11 @@ namespace AdaptiveNet
 
         private readonly ManualLogSource _log;
         private readonly string _directory;
-        private readonly long _maximumFileBytes;
-        private readonly int _retainedFiles;
-        private readonly int _retentionDays;
+        // Set by the main thread (constructor and cfg reload), read by the writer thread at its
+        // next rotation or prune. Kept as ints so each read is a single volatile load.
+        private volatile int _maximumFileMiB;
+        private volatile int _retainedFiles;
+        private volatile int _retentionDays;
         private readonly BlockingCollection<WriteJob> _jobs = new BlockingCollection<WriteJob>(8);
         private readonly Thread _worker;
         private readonly string _sessionStamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
@@ -119,9 +121,7 @@ namespace AdaptiveNet
         {
             _log = log;
             _directory = Path.Combine(Paths.BepInExRootPath, "AdaptiveNet", "incidents");
-            _maximumFileBytes = Math.Max(1L, settings.IncidentFileMaxMiB.Value) * 1024L * 1024L;
-            _retainedFiles = Math.Max(1, settings.RetainedIncidentFiles.Value);
-            _retentionDays = Math.Max(1, settings.IncidentRetentionDays.Value);
+            ApplyLimits(settings);
             Directory.CreateDirectory(_directory);
             PruneFiles(Math.Max(0, _retainedFiles - 1));
             _worker = new Thread(WriterLoop)
@@ -131,6 +131,20 @@ namespace AdaptiveNet
             };
             _worker.Start();
         }
+
+        /// <summary>
+        /// File size, file count and age limits, re-read when the cfg changes. They take effect
+        /// at the next rotation; restarting the writer instead would block the main thread on
+        /// Dispose for up to two seconds.
+        /// </summary>
+        public void ApplyLimits(Settings settings)
+        {
+            _maximumFileMiB = Math.Max(1, settings.IncidentFileMaxMiB.Value);
+            _retainedFiles = Math.Max(1, settings.RetainedIncidentFiles.Value);
+            _retentionDays = Math.Max(1, settings.IncidentRetentionDays.Value);
+        }
+
+        private long MaximumFileBytes => _maximumFileMiB * 1024L * 1024L;
 
         public int DroppedJobs => _droppedJobs;
         public bool Available => !_disabled && !_disposed;
@@ -285,7 +299,7 @@ namespace AdaptiveNet
 
         private void RotateIfNeeded(int nextRowCharacters)
         {
-            if (_writer == null || _estimatedBytes + nextRowCharacters <= _maximumFileBytes) return;
+            if (_writer == null || _estimatedBytes + nextRowCharacters <= MaximumFileBytes) return;
             _writer.Dispose();
             _writer = null;
             PruneFiles(Math.Max(0, _retainedFiles - 1));

@@ -75,6 +75,20 @@ namespace AdaptiveNet
             States.Clear();
         }
 
+        /// <summary>
+        /// Swaps in options reloaded from the cfg. Every interval and cap is read from the
+        /// options on each pass, so peer state and metrics carry over; only the grouping is
+        /// refreshed at once so a new radius or minimum does not wait for the next cycle.
+        /// </summary>
+        public static void UpdateOptions(PeerSchedulerOptions options)
+        {
+            if (options == null) throw new ArgumentNullException(nameof(options));
+            if (_options == null) return;
+            options.Validate();
+            _options = options;
+            _nextClusterRefresh = 0d;
+        }
+
         public static bool TryHandle(ZDOMan manager)
         {
             if (_faulted || _options == null || manager == null) return false;

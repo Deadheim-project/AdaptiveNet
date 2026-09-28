@@ -31,7 +31,9 @@ namespace AdaptiveNet
 
         public ISocket Socket { get; }
         public AdaptiveConnectionController Controller { get; }
-        public CircularHistory<PeerTelemetryPoint> History { get; }
+        // Replaced, never resized in place, when HistorySeconds changes: an incident already
+        // copying the old one keeps a consistent snapshot.
+        public CircularHistory<PeerTelemetryPoint> History { get; set; }
         public RemoteClientTelemetryState ClientTelemetry { get; } = new RemoteClientTelemetryState();
         public AdaptiveDecision Decision { get; set; }
         public NetworkSample LastSample { get; set; }
@@ -120,6 +122,7 @@ namespace AdaptiveNet
         private static double _activeIncidentEndTime;
         private static double _nextAutomaticIncidentTime;
         private static string _pendingManualTrigger = string.Empty;
+        private static bool _settingsChanged;
 
         public static bool IsActive => _active;
         public static bool SchedulerEnabled => _settings != null && _settings.AdaptivePeerScheduler.Value;
@@ -145,10 +148,8 @@ namespace AdaptiveNet
             _nextLogTime = 0d;
             _nextClientReportTime = 0d;
             _nextOwnershipSampleTime = 0d;
-            _historyCapacity = Math.Max(
-                4,
-                (int)Math.Ceiling(settings.HistorySeconds.Value /
-                                  Math.Max(0.25f, settings.SampleIntervalSeconds.Value)) + 4);
+            _historyCapacity = ComputeHistoryCapacity(settings);
+            _settingsChanged = false;
             _pendingLocalHealth = default;
             ResetClientContextWindow();
             _incidentWriterInitializationFailed = false;
@@ -161,25 +162,101 @@ namespace AdaptiveNet
             _nextAutomaticIncidentTime = 0d;
             _pendingManualTrigger = string.Empty;
 
-            if (_settings.CsvTelemetry.Value)
-            {
-                try
-                {
-                    _csv = new CsvTelemetry(_log);
-                }
-                catch (Exception exception)
-                {
-                    _csv = null;
-                    _log.LogWarning(
-                        $"Aggregate CSV telemetry disabled safely: {exception.GetType().Name}: {exception.Message}");
-                }
-            }
+            SyncCsvTelemetry();
 
             string conflictText = _conflicts.Count == 0 ? "none" : string.Join(", ", _conflicts);
             _log.LogInfo($"AdaptiveNet mode={EffectiveModeLabel()}, conflicts={conflictText}, diagnosticHistory={settings.HistorySeconds.Value}s");
             if (_conflicts.Count > 0)
             {
                 _log.LogWarning("A known network overhaul is installed. AdaptiveNet is observe-only; no transport or ZDO limits will be changed.");
+            }
+        }
+
+        /// <summary>
+        /// A setting changed: the cfg was reloaded, ServerSync applied the server's values (or
+        /// restored the local ones on disconnect), or someone edited it in ConfigurationManager.
+        /// The rebuild waits for the next Tick so a batch of dozens of entries costs one pass.
+        /// </summary>
+        public static void NotifySettingsChanged()
+        {
+            _settingsChanged = true;
+        }
+
+        /// <summary>
+        /// Rebuilds what Initialize derived from the cfg, keeping per-connection state: each
+        /// controller keeps its learned rate and ping baseline, each history keeps its newest
+        /// samples. Everything else in the cfg is read where it is used.
+        ///
+        /// One thing still waits for a reconnect: when AdaptiveNet turns inactive, the Steam
+        /// limits it already set on open connections stay, because it does not know the values
+        /// Valheim would have used. They are the game's own again when that player reconnects.
+        /// </summary>
+        private static void ApplySettingChanges()
+        {
+            _settingsChanged = false;
+
+            _controllerOptions = _settings.BuildControllerOptions();
+            AdaptivePeerScheduler.UpdateOptions(_settings.BuildSchedulerOptions());
+            _historyCapacity = ComputeHistoryCapacity(_settings);
+            lock (Gate)
+            {
+                foreach (ConnectionContext context in Connections.Values)
+                {
+                    context.Controller.UpdateOptions(_controllerOptions);
+                    if (context.History.Capacity != _historyCapacity)
+                    {
+                        context.History = context.History.WithCapacity(_historyCapacity);
+                    }
+
+                    // ApplySteamLimits only pushes when the rate or buffer moves; a new Nagle
+                    // time, rate floor or buffer bound would otherwise wait for the next change.
+                    context.LastAppliedRate = 0;
+                    context.LastAppliedBuffer = 0;
+                }
+            }
+
+            bool wasActive = _active;
+            _active = ComputeActive();
+            SyncCsvTelemetry();
+            _incidents?.ApplyLimits(_settings);
+
+            _log.LogInfo(
+                $"AdaptiveNet settings applied: mode={EffectiveModeLabel()}, " +
+                $"scheduler={(_settings.AdaptivePeerScheduler.Value ? "on" : "off")}, " +
+                $"diagnosticHistory={_settings.HistorySeconds.Value}s." +
+                (wasActive && !_active
+                    ? " Steam limits already set on open connections stay until those players reconnect."
+                    : string.Empty));
+        }
+
+        private static int ComputeHistoryCapacity(Settings settings)
+        {
+            return Math.Max(
+                4,
+                (int)Math.Ceiling(settings.HistorySeconds.Value /
+                                  Math.Max(0.25f, settings.SampleIntervalSeconds.Value)) + 4);
+        }
+
+        /// <summary>Opens or closes the aggregate CSV to match CsvTelemetry.</summary>
+        private static void SyncCsvTelemetry()
+        {
+            if (!_settings.CsvTelemetry.Value)
+            {
+                _csv?.Dispose();
+                _csv = null;
+                return;
+            }
+
+            if (_csv != null) return;
+            try
+            {
+                _csv = new CsvTelemetry(_log);
+            }
+            catch (Exception exception)
+            {
+                _csv = null;
+                _log.LogWarning(
+                    $"Aggregate CSV telemetry disabled safely: {exception.GetType().Name}: {exception.Message}");
             }
         }
 
@@ -250,6 +327,7 @@ namespace AdaptiveNet
         public static void Tick(double unscaledTime)
         {
             if (_settings == null) return;
+            if (_settingsChanged) ApplySettingChanges();
             RecheckConflictsOnce();
             ClientTelemetryRpc.EnsureRegistered();
             if (unscaledTime < _nextSampleTime) return;
@@ -589,7 +667,12 @@ namespace AdaptiveNet
             string trigger = hasManualTrigger
                 ? manualTrigger
                 : now >= _nextAutomaticIncidentTime ? automaticTrigger : string.Empty;
-            if (string.IsNullOrEmpty(trigger) || _incidents == null || !_incidents.Available)
+            // IncidentTelemetry is checked here, not only where the writer is created: turned off
+            // with the server running, the writer stays alive but no new capture starts.
+            if (string.IsNullOrEmpty(trigger) ||
+                !_settings.IncidentTelemetry.Value ||
+                _incidents == null ||
+                !_incidents.Available)
             {
                 return;
             }

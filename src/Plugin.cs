@@ -1,6 +1,7 @@
 using System;
 using BepInEx;
 using HarmonyLib;
+using ServerSync;
 using UnityEngine;
 
 namespace AdaptiveNet
@@ -14,15 +15,35 @@ namespace AdaptiveNet
 
         private Harmony _harmony;
         private Settings _settings;
+        private static ConfigSync _configSync;
 
         private void Awake()
         {
             try
             {
-                _settings = Settings.Bind(Config);
+                // The server's cfg is the one that counts: ServerSync hands it to every client
+                // that has AdaptiveNet. Not required on the other side, because the mod is meant
+                // to keep working server-only with vanilla clients; a client without it (or with
+                // a build from before ServerSync) simply keeps its own file.
+                _configSync = new ConfigSync(PluginGuid)
+                {
+                    DisplayName = PluginName,
+                    CurrentVersion = PluginVersion,
+                    MinimumRequiredVersion = PluginVersion,
+                    ModRequired = false,
+                    IsLocked = true
+                };
+                _settings = Settings.Bind(Config, _configSync);
                 GameAccess.Initialize();
                 var conflicts = CompatibilityGuard.Detect();
                 NetworkRuntime.Initialize(_settings, Logger, conflicts);
+
+                // Raised by a cfg reload (ConfigWatcher, when the file is saved with the game
+                // running), by ServerSync applying the server's values and by ConfigurationManager.
+                // The runtime rebuilds what it cached on its next tick.
+                Config.SettingChanged += (_, __) => NetworkRuntime.NotifySettingsChanged();
+                Deadheim.Shared.ConfigWatcher.Watch(Config, PluginName);
+
                 _harmony = new Harmony(PluginGuid);
                 _harmony.PatchAll(typeof(Plugin).Assembly);
                 Logger.LogInfo($"{PluginName} {PluginVersion} loaded.");

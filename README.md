@@ -120,6 +120,16 @@ O arquivo `config\Detalhes.AdaptiveNet.cfg` do repositório — e `BepInEx\confi
 
 Um grupo de 2, 8, 10, 12 ou mais jogadores é reconhecido automaticamente. O valor `12` em `MaximumPeersPerFrame` é apenas o teto de tentativas em cada frame, não um limite para o grupo.
 
+## Configuração sincronizada e recarga ao vivo
+
+O `Detalhes.AdaptiveNet.cfg` do servidor é o que vale. Pelo ServerSync, cada cliente com o AdaptiveNet recebe os valores do servidor ao conectar e roda com eles, inclusive a cadência de upload e os limiares da caixa-preta, que precisam ser iguais nas duas pontas. Pelo jogo, só admin do servidor altera um valor sincronizado.
+
+Ficam locais, por serem de cada máquina: `Diagnostics.OverlayKey`, `Diagnostics.IncidentMarkerKey`, `Diagnostics.LogIntervalSeconds` e `Diagnostics.CsvTelemetry`.
+
+Cliente vanilla, ou com uma versão anterior ao ServerSync, continua conectando e usa o próprio arquivo. Cliente com AdaptiveNet que já tem ServerSync precisa estar na mesma versão do servidor; por isso, atualize servidor e launcher juntos.
+
+Salvar o `.cfg` com o servidor ligado recarrega a configuração no frame seguinte e a repassa aos clientes conectados, sem reiniciar. As conexões abertas mantêm o que já aprenderam (taxa atual, ping de referência e histórico). A única exceção é desligar o mod ao vivo (`General.Enabled = false` ou `Mode = ObserveOnly`): o orçamento de ZDO e o escalonador voltam ao vanilla na hora, mas os limites Steam já aplicados a uma conexão ficam até aquele jogador reconectar.
+
 ## Validação com carga real
 
 Primeiro valide com o preset sem aumentar limites. Durante um evento com 8–12+ jogadores juntos, observe o log a cada 15 segundos. A caixa-preta de incidentes já fica ativa no preset. Para uma comparação agregada A/B, altere temporariamente:

@@ -117,6 +117,18 @@ namespace AdaptiveNet.Core
             _next = 0;
             Count = 0;
         }
+
+        /// <summary>A copy holding up to <paramref name="capacity"/> of the newest items, for a
+        /// history window resized while connections are open. The original is left as it was,
+        /// so a reader already holding it is unaffected.</summary>
+        public CircularHistory<T> WithCapacity(int capacity)
+        {
+            var ordered = new List<T>(Count);
+            CopyOrderedTo(ordered);
+            var resized = new CircularHistory<T>(capacity);
+            foreach (T item in ordered) resized.Add(item);
+            return resized;
+        }
     }
 
     internal sealed class DeliveryDelayEstimator

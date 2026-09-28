@@ -113,6 +113,36 @@ AdaptiveControllerOptions StandardOptions()
 }
 
 {
+    // A cfg reload swaps the options without resetting what the connection learned.
+    var controller = new AdaptiveConnectionController(StandardOptions());
+    controller.Observe(Sample(pending: 8 * 1024, queueDelay: 20));
+    controller.Observe(Sample(pending: 8 * 1024, queueDelay: 20));
+    controller.Observe(Sample(pending: 8 * 1024, queueDelay: 20));
+    Test.Equal(576 * 1024, controller.TargetSendRateBytesPerSecond, "rate learned before the reload");
+
+    var reloaded = StandardOptions();
+    reloaded.InitialSendRateBytesPerSecond = 128 * 1024;
+    reloaded.AdditiveIncreaseBytesPerSecond = 128 * 1024;
+    controller.UpdateOptions(reloaded);
+    Test.Equal(576 * 1024, controller.TargetSendRateBytesPerSecond,
+        "reload keeps the learned rate instead of restarting from the initial one");
+    controller.Observe(Sample(pending: 8 * 1024, queueDelay: 20));
+    controller.Observe(Sample(pending: 8 * 1024, queueDelay: 20));
+    AdaptiveDecision grown = controller.Observe(Sample(pending: 8 * 1024, queueDelay: 20));
+    Test.Equal(704 * 1024, grown.SendRateLimitBytesPerSecond, "growth uses the reloaded step");
+
+    var lowered = StandardOptions();
+    lowered.MaximumSendRateBytesPerSecond = 256 * 1024;
+    controller.UpdateOptions(lowered);
+    Test.Equal(256 * 1024, controller.TargetSendRateBytesPerSecond, "a lower ceiling clamps the learned rate");
+
+    var raised = StandardOptions();
+    raised.MinimumSendRateBytesPerSecond = 512 * 1024;
+    controller.UpdateOptions(raised);
+    Test.Equal(512 * 1024, controller.TargetSendRateBytesPerSecond, "a higher floor lifts the learned rate");
+}
+
+{
     var scheduler = new PeerSchedulerOptions();
     Test.Equal(50,
         PeerCadencePolicy.GetIntervalMilliseconds(true, 2, 2, scheduler),
@@ -142,6 +172,26 @@ AdaptiveControllerOptions StandardOptions()
     Test.Equal(3, history.Count, "history stays at fixed capacity");
     Test.Equal(2, ordered[0], "history drops oldest value after wrap");
     Test.Equal(4, ordered[2], "history preserves chronological order after wrap");
+
+    var shrunk = history.WithCapacity(2);
+    var shrunkOrdered = new List<int>();
+    shrunk.CopyOrderedTo(shrunkOrdered);
+    Test.Equal(2, shrunk.Capacity, "resized history takes the new capacity");
+    Test.Equal(3, shrunkOrdered[0], "shrinking keeps the newest values");
+    Test.Equal(4, shrunkOrdered[1], "shrinking keeps chronological order");
+    Test.Equal(3, history.Count, "the original history is left untouched");
+
+    var grown = history.WithCapacity(5);
+    var grownOrdered = new List<int>();
+    grown.CopyOrderedTo(grownOrdered);
+    Test.Equal(3, grown.Count, "growing keeps every value");
+    grown.Add(5);
+    grown.Add(6);
+    grown.Add(7);
+    grownOrdered.Clear();
+    grown.CopyOrderedTo(grownOrdered);
+    Test.Equal(5, grownOrdered.Count, "grown history fills to its new capacity");
+    Test.Equal(3, grownOrdered[0], "grown history wraps at its new capacity");
 }
 
 {
