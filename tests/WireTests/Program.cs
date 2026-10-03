@@ -137,7 +137,66 @@ Assert.True(!PinnedSteamSender.IsRetryLater(Steamworks.EResult.k_EResultInvalidP
 Assert.True(!PinnedSteamSender.IsRetryLater(Steamworks.EResult.k_EResultFail),
     "an unexpected result still disables the pinned path");
 
+// ServerSync wraps peer.m_socket once per mod copy and can leave the wrappers in place.
+var realSocket = new StubSocket();
+Assert.True(ReferenceEquals(realSocket, SocketUnwrapper.Unwrap(realSocket)),
+    "a plain socket is its own transport");
+ISocket nested = new WrappingSocket(new WrappingSocket(new OtherWrappingSocket(realSocket)));
+Assert.True(ReferenceEquals(realSocket, SocketUnwrapper.Unwrap(nested)),
+    "nested ServerSync-style wrappers of different types unwrap to the real socket");
+var emptyWrapper = new WrappingSocket(null);
+Assert.True(ReferenceEquals(emptyWrapper, SocketUnwrapper.Unwrap(emptyWrapper)),
+    "a wrapper without an inner socket is left as it is");
+var unrelated = new SocketWithUnrelatedOriginal();
+Assert.True(ReferenceEquals(unrelated, SocketUnwrapper.Unwrap(unrelated)),
+    "a field named Original that is not a socket is not followed");
+Assert.True(SocketUnwrapper.Unwrap(null) == null, "no socket stays no socket");
+
 System.Console.WriteLine($"Wire tests passed: {Assert.Passed}");
+
+class StubSocket : ISocket
+{
+    public bool IsConnected() => true;
+    public void Send(ZPackage pkg) { }
+    public ZPackage Recv() => null;
+    public int GetSendQueueSize() => 0;
+    public int GetCurrentSendRate() => 0;
+    public bool IsHost() => false;
+    public void Dispose() { }
+    public bool GotNewData() => false;
+    public void Close() { }
+    public string GetEndPointString() => "stub";
+    public void GetAndResetStats(out int totalSent, out int totalRecv) { totalSent = 0; totalRecv = 0; }
+    public void GetConnectionQuality(out float localQuality, out float remoteQuality, out int ping,
+        out float outByteSec, out float inByteSec)
+    {
+        localQuality = 0f; remoteQuality = 0f; ping = 0; outByteSec = 0f; inByteSec = 0f;
+    }
+    public ISocket Accept() => null;
+    public int GetHostPort() => 0;
+    public bool Flush() => true;
+    public string GetHostName() => "stub";
+    public void VersionMatch() { }
+}
+
+// Shaped like ServerSync's BufferingSocket: a public readonly ISocket named Original.
+class WrappingSocket : StubSocket
+{
+    public readonly ISocket Original;
+    public WrappingSocket(ISocket original) => Original = original;
+}
+
+// A second copy's wrapper is a different type, as each mod compiles its own ServerSync.
+class OtherWrappingSocket : StubSocket
+{
+    private readonly ISocket Original;
+    public OtherWrappingSocket(ISocket original) => Original = original;
+}
+
+class SocketWithUnrelatedOriginal : StubSocket
+{
+    public readonly string Original = "not a socket";
+}
 
 static class Assert
 {

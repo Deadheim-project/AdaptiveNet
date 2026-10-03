@@ -50,6 +50,7 @@ namespace AdaptiveNet
         public double NextManualMarkerTime { get; set; }
         public double LastAnomalyTime { get; set; } = double.NegativeInfinity;
         public bool ClientReportMissingLatched { get; set; }
+        public bool TransportSampleMissingLatched { get; set; }
     }
 
     internal sealed class DiagnosticsSnapshot
@@ -396,11 +397,15 @@ namespace AdaptiveNet
                 {
                     ZNetPeer peer = connectedPeers[index];
                     ISocket socket = peer.m_socket;
+                    // Keyed by the socket the peer holds, which GetZdoQueueBudget looks up every
+                    // send; sampled and tuned through the real one, which on a crossplay server
+                    // sits under ServerSync wrappers for the whole session.
+                    ISocket transport = SocketUnwrapper.Unwrap(socket);
                     seen.Add(socket);
                     ConnectionContext context = GetOrCreate(socket, unscaledTime);
                     context.PlayerName = SanitizePlayerName(peer.m_playerName);
                     context.PeerUid = peer.m_uid;
-                    bool transportSampleAvailable = TrySample(socket, out NetworkSample sample);
+                    bool transportSampleAvailable = TrySample(transport, out NetworkSample sample);
                     context.LastSample = sample;
                     if (transportSampleAvailable)
                     {
@@ -415,7 +420,7 @@ namespace AdaptiveNet
                     // upside and a measured downside (2026-08-24: a client-side cut to the
                     // 64 KiB/s floor created an 86 ms send-queue delay against a link whose ping
                     // and queue delay were both healthy). Clients still sample and report.
-                    if (transportSampleAvailable && _active && isServer && socket is ZSteamSocket steamSocket)
+                    if (transportSampleAvailable && _active && isServer && transport is ZSteamSocket steamSocket)
                     {
                         ApplySteamLimits(
                             context,
@@ -453,9 +458,16 @@ namespace AdaptiveNet
                     currentPoints.Add(point);
 
                     string anomaly = ClassifyPeerAnomaly(context, client, unscaledTime);
-                    if (!transportSampleAvailable &&
-                        unscaledTime - context.ConnectedAt >= Math.Max(5d, EffectiveClientReportIntervalSeconds() * 3d))
+                    // Once per outage, like client-report-missing: a link that cannot be sampled
+                    // at all used to start a capture every cooldown, all session long.
+                    if (transportSampleAvailable)
                     {
+                        context.TransportSampleMissingLatched = false;
+                    }
+                    else if (!context.TransportSampleMissingLatched &&
+                             unscaledTime - context.ConnectedAt >= Math.Max(5d, EffectiveClientReportIntervalSeconds() * 3d))
+                    {
+                        context.TransportSampleMissingLatched = true;
                         AppendTrigger(ref anomaly, "transport-sample-unavailable");
                     }
                     if (!string.IsNullOrEmpty(anomaly))

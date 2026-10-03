@@ -20,7 +20,7 @@ O mod é independente e não precisa de nenhum outro mod de rede. Não o execute
 
 - Valheim Dedicated Server para Windows, na versão usada para compilar o DLL.
 - BepInEx 5.4.23 ou compatível instalado no servidor.
-- Backend Steam para receber todas as otimizações de transporte. Com crossplay, recursos genéricos como o escalonador podem continuar úteis, mas os ajustes específicos de `ZSteamSocket` não se aplicam.
+- Conexão Steam para receber todas as otimizações de transporte. Num servidor crossplay, quem conecta por socket Steam recebe todas; conexões PlayFab ficam com o escalonador e a cota de ZDO. O ServerSync de cada mod deixa o socket do jogador embrulhado num `BufferingSocket` a sessão inteira em servidor crossplay; o AdaptiveNet mede e ajusta a conexão real por baixo deles (até a 0.4.1 não media, e a cota de ZDO ficava no valor vanilla).
 - Em uso server-only, clientes vanilla ainda conectam. Para corrigir também a fila de upload dos jogadores neste modpack obrigatório, distribua o mesmo DLL aos clientes.
 
 AdaptiveNet e VBNetTweaks não podem operar juntos. Remova o VBNetTweaks do servidor e do manifesto do launcher antes do teste A/B; apenas desligar algumas opções não remove seus patches carregados.

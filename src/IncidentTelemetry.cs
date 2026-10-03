@@ -273,6 +273,11 @@ namespace AdaptiveNet
                     if (job.Flush) _writer.Flush();
                 }
             }
+            catch (ThreadAbortException)
+            {
+                // Mono aborts background threads when the server shuts down; reporting that as an
+                // I/O failure sent the last line of every restart looking for a disk problem.
+            }
             catch (Exception exception)
             {
                 _disabled = true;
