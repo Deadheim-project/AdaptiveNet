@@ -8,7 +8,7 @@ namespace AdaptiveNet
 {
     internal sealed class CsvTelemetry : IDisposable
     {
-        private const string Header = "utc,session_seconds,mode,peers,network_sample_peers,ping_avg_ms,ping_p95_ms,queued_bytes,queue_max_ms,rate_avg_kib_s,zdo_avg_kib,congested_peers,grouped_peers,scheduler_attempts_s,scheduler_budget_stops_s,local_fps,local_frame_p95_ms,local_frame_max_ms,local_gc_collections,local_gc_correlated_frame_ms,client_telemetry_peers,missing_client_reports,client_frame_max_ms,client_report_delay_max_ms,active_nonplayer_characters,unowned_nonplayer_characters,active_incident_id,dropped_incident_jobs";
+        private const string Header = "utc,session_seconds,mode,peers,network_sample_peers,ping_avg_ms,ping_p95_ms,queued_bytes,queue_max_ms,rate_avg_kib_s,zdo_avg_kib,congested_peers,grouped_peers,scheduler_attempts_s,scheduler_budget_stops_s,local_fps,local_frame_p95_ms,local_frame_max_ms,local_gc_collections,local_gc_correlated_frame_ms,client_telemetry_peers,missing_client_reports,client_frame_max_ms,client_report_delay_max_ms,active_nonplayer_characters,unowned_nonplayer_characters,active_incident_id,dropped_incident_jobs,send_rate_avg_kib_s,send_rate_min_kib_s";
         private readonly StreamWriter _writer;
         private readonly ManualLogSource _log;
         private int _rowsSinceFlush;
@@ -90,7 +90,9 @@ namespace AdaptiveNet
                 snapshot.ActiveNonPlayerCharacters.ToString(CultureInfo.InvariantCulture),
                 snapshot.UnownedNonPlayerCharacters.ToString(CultureInfo.InvariantCulture),
                 snapshot.ActiveIncidentId.ToString(CultureInfo.InvariantCulture),
-                snapshot.DroppedIncidentJobs.ToString(CultureInfo.InvariantCulture));
+                snapshot.DroppedIncidentJobs.ToString(CultureInfo.InvariantCulture),
+                snapshot.AverageTransportRateKiB.ToString("F3", CultureInfo.InvariantCulture),
+                snapshot.MinimumTransportRateKiB.ToString("F3", CultureInfo.InvariantCulture));
         }
 
         public void Dispose()

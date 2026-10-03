@@ -34,7 +34,7 @@ namespace AdaptiveNet
             DrawLine(ref y, $"Mode: {value.EffectiveMode}   Peers: {value.PeerCount}   Congested: {value.CongestedPeers}");
             DrawLine(ref y, $"Ping avg/p95: {value.AveragePingMs:F0}/{value.P95PingMs:F0} ms");
             DrawLine(ref y, $"Queue: {value.TotalQueuedBytes / 1024d:F1} KiB   max delay: {value.MaximumQueueDelayMs:F1} ms");
-            DrawLine(ref y, $"Rate ceiling avg: {value.AverageRateLimitKiB:F0} KiB/s");
+            DrawLine(ref y, $"Send rate avg/min: {value.AverageTransportRateKiB:F0}/{value.MinimumTransportRateKiB:F0} KiB/s   cap avg: {value.AverageRateLimitKiB:F0}");
             DrawLine(ref y, $"ZDO budget avg: {value.AverageZdoBudgetKiB:F1} KiB");
             DrawLine(ref y, $"Grouped: {value.GroupedPeers}   scheduler: {value.SchedulerAttemptsPerSecond:F0} attempts/s");
             DrawLine(ref y, $"Local FPS: {value.LocalAverageFps:F0}   frame p95/max: {value.LocalP95FrameMs:F0}/{value.LocalMaximumFrameMs:F0} ms");

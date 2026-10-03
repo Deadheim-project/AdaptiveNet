@@ -47,6 +47,7 @@ namespace AdaptiveNet
         public double NextIncidentLogTime { get; set; }
         public double ConnectedAt { get; }
         public double NextInvalidTelemetryLogTime { get; set; }
+        public double NextManualMarkerTime { get; set; }
         public double LastAnomalyTime { get; set; } = double.NegativeInfinity;
         public bool ClientReportMissingLatched { get; set; }
     }
@@ -61,7 +62,12 @@ namespace AdaptiveNet
         public double P95PingMs { get; set; }
         public long TotalQueuedBytes { get; set; }
         public double MaximumQueueDelayMs { get; set; }
+        // The ceiling AdaptiveNet asked Steam for, not what Steam sends at; see the real rate below.
         public double AverageRateLimitKiB { get; set; }
+        // Steam's own per-connection send rate (m_nSendRateBytesPerSecond), the one that paces
+        // the wire. Zero when no link reported one.
+        public double AverageTransportRateKiB { get; set; }
+        public double MinimumTransportRateKiB { get; set; }
         public double AverageZdoBudgetKiB { get; set; }
         public int CongestedPeers { get; set; }
         public int GroupedPeers { get; set; }
@@ -87,6 +93,9 @@ namespace AdaptiveNet
     internal static class NetworkRuntime
     {
         public const int VanillaZdoQueueBudgetBytes = 10 * 1024;
+        // ZSteamSocket.RegisterGlobalCallbacks sets SendRateMin = SendRateMax = 153600.
+        private const int VanillaSteamSendRateKiB = 150;
+        private const double ManualMarkerIntervalSeconds = 30d;
 
         private static readonly object Gate = new object();
         private static readonly Dictionary<ISocket, ConnectionContext> Connections =
@@ -170,6 +179,22 @@ namespace AdaptiveNet
             {
                 _log.LogWarning("A known network overhaul is installed. AdaptiveNet is observe-only; no transport or ZDO limits will be changed.");
             }
+            WarnIfSendRateFloorBelowVanilla();
+        }
+
+        /// <summary>
+        /// The installer keeps an existing cfg and BepInEx keeps a value already written there,
+        /// so a server updated from 0.4.0 or older still carries the old 64 KiB/s floor even
+        /// though the default is now 150. Say so where an admin will read it.
+        /// </summary>
+        private static void WarnIfSendRateFloorBelowVanilla()
+        {
+            int floor = _settings.MinimumSendRateKiB.Value;
+            if (floor >= VanillaSteamSendRateKiB) return;
+            _log.LogWarning(
+                $"Controller.MinimumSendRateKiB={floor} is below Valheim's own Steam send rate ({VanillaSteamSendRateKiB} KiB/s). " +
+                "Steam only clamps each connection's rate, so a lowered ceiling leaves that player below vanilla until they reconnect. " +
+                $"Set it to {VanillaSteamSendRateKiB} in the cfg; a live save applies it to open connections too.");
         }
 
         /// <summary>
@@ -227,6 +252,7 @@ namespace AdaptiveNet
                 (wasActive && !_active
                     ? " Steam limits already set on open connections stay until those players reconnect."
                     : string.Empty));
+            WarnIfSendRateFloorBelowVanilla();
         }
 
         private static int ComputeHistoryCapacity(Settings settings)
@@ -520,7 +546,14 @@ namespace AdaptiveNet
         {
             if (_settings == null || ZNet.instance == null || !ZNet.instance.IsServer()) return;
             ZNetPeer peer = FindConnectedPeer(sender);
-            if (peer == null) return;
+            if (peer?.m_socket == null) return;
+            // A marker skips the automatic cooldown and dumps every player's history, and any
+            // client can send it (Valheim does not even check a routed RPC's sender id), so it
+            // is rationed per connection: one held F9 cannot keep the black box busy.
+            double now = Time.realtimeSinceStartupAsDouble;
+            ConnectionContext context = GetOrCreate(peer.m_socket, now);
+            if (now < context.NextManualMarkerTime) return;
+            context.NextManualMarkerTime = now + ManualMarkerIntervalSeconds;
             AppendTrigger(
                 ref _pendingManualTrigger,
                 $"manual-marker;player={SanitizePlayerName(peer.m_playerName)};uid={sender};clientTime={clientTime:F3}");
@@ -909,7 +942,8 @@ namespace AdaptiveNet
                 $"(local={FormatQuality(sample.LocalQuality)}, remote={FormatQuality(sample.RemoteQuality)}), " +
                 $"queue={sample.QueueDelayMilliseconds:F0}ms/{sample.TotalQueuedBytes / 1024d:F1}KiB, " +
                 $"localFrameMax={localHealth.MaximumFrameMilliseconds:F0}ms, " +
-                $"reason={context.Decision.Reason}, rate=" +
+                $"reason={context.Decision.Reason}, " +
+                $"sendRate={sample.TransportSendRateBytesPerSecond / 1024}KiB/s, cap=" +
                 $"{(context.LastAppliedRate > 0 ? context.LastAppliedRate : context.Decision.SendRateLimitBytesPerSecond) / 1024}KiB/s";
             if (context.Decision.Congested)
             {
@@ -962,6 +996,15 @@ namespace AdaptiveNet
                 snapshot.P95PingMs = pings[Math.Max(0, p95Index)];
                 snapshot.TotalQueuedBytes = networkContexts.Sum(item => (long)item.LastSample.TotalQueuedBytes);
                 snapshot.MaximumQueueDelayMs = networkContexts.Max(item => item.LastSample.QueueDelayMilliseconds);
+                int[] transportRates = networkContexts
+                    .Select(item => item.LastSample.TransportSendRateBytesPerSecond)
+                    .Where(value => value > 0)
+                    .ToArray();
+                if (transportRates.Length > 0)
+                {
+                    snapshot.AverageTransportRateKiB = transportRates.Average() / 1024d;
+                    snapshot.MinimumTransportRateKiB = transportRates.Min() / 1024d;
+                }
             }
             snapshot.AverageRateLimitKiB = contexts.Average(item =>
                 (item.LastAppliedRate > 0 ? item.LastAppliedRate : item.Decision.SendRateLimitBytesPerSecond) / 1024d);
@@ -986,7 +1029,8 @@ namespace AdaptiveNet
             _log.LogInfo(
                 $"telemetry peers={_snapshot.PeerCount}, networkSamples={_snapshot.NetworkSamplePeers}, ping(avg/p95)={_snapshot.AveragePingMs:F0}/{_snapshot.P95PingMs:F0}ms, " +
                 $"queued={_snapshot.TotalQueuedBytes / 1024d:F1}KiB, queueMax={_snapshot.MaximumQueueDelayMs:F1}ms, " +
-                $"rateAvg={_snapshot.AverageRateLimitKiB:F0}KiB/s, zdoAvg={_snapshot.AverageZdoBudgetKiB:F1}KiB, " +
+                $"sendRate(avg/min)={_snapshot.AverageTransportRateKiB:F0}/{_snapshot.MinimumTransportRateKiB:F0}KiB/s, " +
+                $"rateCapAvg={_snapshot.AverageRateLimitKiB:F0}KiB/s, zdoAvg={_snapshot.AverageZdoBudgetKiB:F1}KiB, " +
                 $"congested={_snapshot.CongestedPeers}, grouped={_snapshot.GroupedPeers}, " +
                 $"localFps={_snapshot.LocalAverageFps:F0}, localFrameMax={_snapshot.LocalMaximumFrameMs:F0}ms, " +
                 $"clientReports={_snapshot.ClientTelemetryPeers}/{_snapshot.PeerCount}, missing={_snapshot.MissingClientReports}, " +

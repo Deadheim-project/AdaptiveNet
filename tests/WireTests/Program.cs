@@ -111,13 +111,31 @@ var aggregate = new DiagnosticsSnapshot
     PeerCount = 30,
     P95PingMs = 100d,
     LocalAverageFps = 60d,
-    MissingClientReports = 0
+    MissingClientReports = 0,
+    AverageRateLimitKiB = 2624d,
+    AverageTransportRateKiB = 150d,
+    MinimumTransportRateKiB = 64d
 };
 string aggregateRow = CsvTelemetry.FormatForTesting(10d, aggregate);
 Assert.Equal(
     CsvTelemetry.HeaderForTesting.Split(',').Length,
     aggregateRow.Split(',').Length,
     "aggregate CSV header and row stay aligned");
+Assert.True(CsvTelemetry.HeaderForTesting.EndsWith(",send_rate_avg_kib_s,send_rate_min_kib_s"),
+    "real Steam send-rate columns are appended, so older column positions stay put");
+Assert.True(aggregateRow.EndsWith(",150.000,64.000"),
+    "aggregate CSV carries the real send rate, not the requested ceiling");
+
+Assert.True(PinnedSteamSender.IsRetryLater(Steamworks.EResult.k_EResultLimitExceeded),
+    "a full Steam send buffer is retried, not a fault");
+Assert.True(PinnedSteamSender.IsRetryLater(Steamworks.EResult.k_EResultNoConnection),
+    "a peer closing before its status callback is retried, not a fault");
+Assert.True(PinnedSteamSender.IsRetryLater(Steamworks.EResult.k_EResultInvalidState),
+    "a connection already past closing is retried, not a fault");
+Assert.True(!PinnedSteamSender.IsRetryLater(Steamworks.EResult.k_EResultInvalidParam),
+    "an invalid send still disables the pinned path");
+Assert.True(!PinnedSteamSender.IsRetryLater(Steamworks.EResult.k_EResultFail),
+    "an unexpected result still disables the pinned path");
 
 System.Console.WriteLine($"Wire tests passed: {Assert.Passed}");
 

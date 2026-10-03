@@ -17,6 +17,9 @@
     <Reference Include="assembly_utils">
       <HintPath>$(ValheimManaged)\assembly_utils.dll</HintPath>
     </Reference>
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(ValheimManaged)\com.rlabrecque.steamworks.net.dll</HintPath>
+    </Reference>
     <Reference Include="UnityEngine">
       <HintPath>$(ValheimManaged)\UnityEngine.dll</HintPath>
     </Reference>

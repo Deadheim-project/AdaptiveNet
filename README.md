@@ -6,9 +6,8 @@ O objetivo é reduzir atrasos de sincronização quando muitos jogadores estão 
 
 - escalonamento justo do envio de ZDOs com limite de tempo de CPU por frame;
 - cadência mais rápida para jogadores próximos, detectados dinamicamente;
-- controle adaptativo por conexão usando ping, qualidade e fila real do transporte;
-- recuo automático quando a conexão mostra congestionamento;
-- buffer confiável curto e proporcional à conexão, para não reproduzir combate antigo após uma perda temporária;
+- cota de ZDO por conexão ajustada por ping, qualidade e fila real do transporte, voltando ao valor vanilla quando a conexão mostra congestionamento;
+- taxa de envio Steam por conexão nunca abaixo da do próprio Valheim (veja [Taxa de envio Steam](#taxa-de-envio-steam));
 - envio Steam com memória fixada no servidor dedicado, evitando uma cópia nativa por pacote;
 - telemetria agregada para medir o resultado sem registrar conteúdo dos jogadores;
 - caixa-preta por jogador com até 60 segundos antes e 15 segundos depois de uma anomalia;
@@ -39,7 +38,7 @@ AdaptiveNet não aumenta sozinho o limite máximo de jogadores do Valheim. O ser
    ```
 
 4. Inicie o servidor e abra `BepInEx\LogOutput.log`.
-5. Confirme a presença de linhas contendo `AdaptiveNet 0.3.0 loaded`, `mode=active`, `diagnosticHistory=60s` e a aplicação do patch de orçamento ZDO.
+5. Confirme a presença de linhas contendo `AdaptiveNet <versão> loaded`, `mode=active`, `diagnosticHistory=60s` e a aplicação do patch de orçamento ZDO.
 
 O instalador valida `valheim_server.exe` e `BepInEx\core\BepInEx.dll`, recusa a instalação enquanto houver um processo `valheim_server` ativo e cria backup do DLL anterior. Uma configuração já existente é preservada por padrão. Para substituir deliberadamente a configuração pelo preset deste pacote:
 
@@ -60,7 +59,7 @@ Com o servidor parado, copie:
 
 Use o pacote `AdaptiveNet-launcher-<versão>.zip`, gerado à parte pelo `New-PrivateServerPackage.ps1`. Ele é plano (`AdaptiveNet.dll` + `config\Detalhes.AdaptiveNet.cfg`, sem a pasta `BepInEx`), no formato que o DeadheimLauncher espera para um mod próprio — não reaproveite o ZIP do servidor, que já vem com a estrutura `BepInEx\...`. Cadastre-o como mod obrigatório do launcher e remova `vbnettweaks` do manifesto. O cliente usa o mesmo `AdaptiveNet.dll`; envio fixado e orçamento agregado continuam exclusivos do dedicated server, enquanto o cliente ganha amostragem da própria rota, fila curta e cadência de upload de 50 ms.
 
-Todos os clientes do Deadheim devem receber exatamente o mesmo DLL 0.3. O relatório diagnóstico é pequeno, versionado e enviado uma vez por segundo diretamente ao servidor. Ele não contém chat, RPCs de gameplay, inventário, endereço IP ou conteúdo dos pacotes.
+Todos os clientes do Deadheim devem receber exatamente o mesmo DLL do servidor. O relatório diagnóstico é pequeno, versionado e enviado uma vez por segundo diretamente ao servidor. Ele não contém chat, RPCs de gameplay, inventário, endereço IP ou conteúdo dos pacotes.
 
 ## Caixa-preta de incidentes
 
@@ -81,7 +80,7 @@ O jogo não é bloqueado para escrever o CSV: um thread em segundo plano possui 
 
 ### Marcação pelo jogador
 
-Quando perceber teleporte, ações atrasadas ou dano chegando tarde, o jogador deve pressionar **F9** assim que possível. Isso pede ao servidor para preservar o minuto anterior e continuar coletando por mais 15 segundos. Se já houver uma captura ativa, o marcador é anexado ao mesmo incidente.
+Quando perceber teleporte, ações atrasadas ou dano chegando tarde, o jogador deve pressionar **F9** assim que possível. Isso pede ao servidor para preservar o minuto anterior e continuar coletando por mais 15 segundos. Se já houver uma captura ativa, o marcador é anexado ao mesmo incidente. O servidor aceita um marcador por jogador a cada 30 segundos e ignora os demais, para que ninguém mantenha a caixa-preta ocupada segurando F9.
 
 F8 continua abrindo o overlay. Ele mostra FPS/frame local, quantidade de clientes reportando, maior atraso dos relatórios e o número do incidente ativo.
 
@@ -109,6 +108,7 @@ O arquivo `config\Detalhes.AdaptiveNet.cfg` do repositório — e `BepInEx\confi
 
 | Opção | Valor | Efeito |
 |---|---:|---|
+| `Controller.MinimumSendRateKiB` | `150` | Piso da taxa real de envio Steam: a mesma taxa fixa do Valheim. Não coloque abaixo de 150; veja [Taxa de envio Steam](#taxa-de-envio-steam). |
 | `Scheduler.GroupRadiusMeters` | `160` | Distância usada para reconhecer jogadores juntos. |
 | `Scheduler.GroupMinimumPlayers` | `2` | Ativa a cadência rápida quando dois jogadores estão próximos; não limita o tamanho do grupo. |
 | `Controller.ServerUploadBudgetMiB` | `12` | Divide até 12 MiB/s de forma justa; grupos recebem peso 1,5. Use `0` somente se houver outro limitador confiável. |
@@ -119,6 +119,19 @@ O arquivo `config\Detalhes.AdaptiveNet.cfg` do repositório — e `BepInEx\confi
 | `ZDO.MaximumQueueBudgetKiB` | `16` | Teto por atendimento para a primeira rodada de medição com carga real. Com `MaximumPeersPerFrame = 12`, um valor de 48 permitia rajadas de até ~576 KiB num único frame do scheduler (57x o vanilla); suba em passos pequenos só depois de confirmar `queue_max_ms` baixo. |
 
 Um grupo de 2, 8, 10, 12 ou mais jogadores é reconhecido automaticamente. O valor `12` em `MaximumPeersPerFrame` é apenas o teto de tentativas em cada frame, não um limite para o grupo.
+
+## Taxa de envio Steam
+
+A Steam não estima a banda de uma conexão. Cada conexão recebe uma taxa fixa ao conectar — no Valheim, 150 KiB/s — e qualquer mudança depois só prende essa taxa entre um piso (`SendRateMin`) e um teto (`SendRateMax`). Por isso:
+
+- subir o teto nunca deixa uma conexão mais rápida;
+- um teto abaixo da taxa atual a reduz de vez, até o jogador reconectar.
+
+O controlador do AdaptiveNet ajusta o teto. Com `MinimumSendRateKiB = 150`, o piso é a própria taxa do Valheim, então a taxa real de cada jogador fica igual à do vanilla, e os ganhos vêm do escalonador e da cota de ZDO. Com um piso menor (o padrão até a 0.4.0 era 64), uma queda passageira de qualidade derrubava o teto e deixava aquele jogador abaixo do vanilla pelo resto da sessão.
+
+A taxa real aparece como `sendRate` nos logs e como `send_rate_avg_kib_s`/`send_rate_min_kib_s` no CSV agregado. `rateCapAvg`, o `cap` das linhas `peer-link` e `adaptive_rate_limit_bps` mostram só o teto pedido. Mudar o piso pelo `.cfg` com o servidor ligado reaplica os limites e já devolve aos 150 KiB/s quem estava abaixo.
+
+Atualizar o DLL não altera um `.cfg` que já existe: um servidor vindo da 0.4.0 ou anterior continua com `MinimumSendRateKiB = 64` até alguém editar o arquivo. Nesse caso o log avisa com uma linha `MinimumSendRateKiB=64 is below Valheim's own Steam send rate`.
 
 ## Configuração sincronizada e recarga ao vivo
 
@@ -145,6 +158,7 @@ Indicadores úteis:
 
 - `ping_p95_ms`: latência percebida pelos piores 5% das conexões;
 - `queue_max_ms`: maior atraso estimado da fila;
+- `send_rate_min_kib_s`: menor taxa real de envio Steam entre as conexões; abaixo de 150 indica um piso mal configurado;
 - `congested_peers`: conexões nas quais o controlador recuou;
 - `grouped_peers`: jogadores reconhecidos como parte de grupos;
 - `scheduler_budget_stops_s`: frames por segundo em que o limite de CPU encerrou o trabalho.

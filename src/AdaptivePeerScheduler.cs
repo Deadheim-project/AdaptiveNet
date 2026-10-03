@@ -2,7 +2,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
 using System.Runtime.CompilerServices;
 using AdaptiveNet.Core;
 using BepInEx.Logging;
@@ -35,6 +34,11 @@ namespace AdaptiveNet
 
         private static readonly Dictionary<ZNetPeer, PeerState> States =
             new Dictionary<ZNetPeer, PeerState>(ReferenceComparer<ZNetPeer>.Instance);
+        // Tick runs every frame on the main thread, so its scratch collections are reused
+        // rather than allocated: per-frame garbage only brings Unity's stop-the-world GC sooner.
+        private static readonly HashSet<ZNetPeer> LivePeers =
+            new HashSet<ZNetPeer>(ReferenceComparer<ZNetPeer>.Instance);
+        private static readonly List<ZNetPeer> StalePeers = new List<ZNetPeer>();
         private static PeerSchedulerOptions _options;
         private static ManualLogSource _log;
         private static double _nextClusterRefresh;
@@ -108,6 +112,7 @@ namespace AdaptiveNet
         public static void Reset()
         {
             States.Clear();
+            LivePeers.Clear();
             _options = null;
             _faulted = false;
             _snapshot = default;
@@ -118,7 +123,8 @@ namespace AdaptiveNet
             IList peers = GameAccess.GetZdoPeers(manager);
             if (peers == null || peers.Count == 0)
             {
-                UpdateMetrics(now, 0);
+                States.Clear();
+                UpdateMetrics(now);
                 return;
             }
 
@@ -163,7 +169,7 @@ namespace AdaptiveNet
 
             _attemptsInWindow += attempts;
             if (budgetStopped) _budgetStopsInWindow++;
-            UpdateMetrics(now, States.Values.Count(state => state.Grouped));
+            UpdateMetrics(now);
         }
 
         private static int FindOldestDuePeer(IList peers, double now)
@@ -187,13 +193,13 @@ namespace AdaptiveNet
 
         private static void SynchronizeStates(IList peers, double now)
         {
-            var live = new HashSet<ZNetPeer>(ReferenceComparer<ZNetPeer>.Instance);
+            LivePeers.Clear();
             int peerCount = Math.Max(1, peers.Count);
             for (int index = 0; index < peers.Count; index++)
             {
                 ZNetPeer peer = GameAccess.GetZNetPeer(peers[index]);
                 if (peer == null) continue;
-                live.Add(peer);
+                LivePeers.Add(peer);
                 if (!States.ContainsKey(peer))
                 {
                     States.Add(peer, new PeerState
@@ -204,7 +210,15 @@ namespace AdaptiveNet
                     });
                 }
             }
-            foreach (ZNetPeer stale in States.Keys.Where(peer => !live.Contains(peer)).ToArray()) States.Remove(stale);
+
+            // Every live peer now has a state, so equal counts mean nobody left.
+            if (States.Count == LivePeers.Count) return;
+            foreach (ZNetPeer peer in States.Keys)
+            {
+                if (!LivePeers.Contains(peer)) StalePeers.Add(peer);
+            }
+            for (int index = 0; index < StalePeers.Count; index++) States.Remove(StalePeers[index]);
+            StalePeers.Clear();
         }
 
         private static void RefreshGroups(IList peers, double now)
@@ -260,11 +274,16 @@ namespace AdaptiveNet
             return state;
         }
 
-        private static void UpdateMetrics(double now, int groupedPeers)
+        private static void UpdateMetrics(double now)
         {
             if (_metricsWindowStart <= 0d) { _metricsWindowStart = now; return; }
             double elapsed = now - _metricsWindowStart;
             if (elapsed < 1d) return;
+            int groupedPeers = 0;
+            foreach (PeerState state in States.Values)
+            {
+                if (state.Grouped) groupedPeers++;
+            }
             _snapshot = new SchedulerSnapshot(groupedPeers, _attemptsInWindow / Math.Max(0.001d, elapsed), _budgetStopsInWindow);
             _attemptsInWindow = 0;
             _budgetStopsInWindow = 0;

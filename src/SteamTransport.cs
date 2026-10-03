@@ -58,6 +58,16 @@ namespace AdaptiveNet
             return true;
         }
 
+        /// <remarks>
+        /// Steam does not estimate bandwidth (Valve's SNP_ClampSendRate, verified 2026-10-03):
+        /// each connection keeps one rate, set when it connects — Valheim's global
+        /// SendRateMin = SendRateMax = 150 KiB/s — and every later change only clamps that
+        /// rate into [minimum, maximum]. Raising the maximum therefore never speeds a
+        /// connection up, while a maximum below the current rate lowers it for good, until the
+        /// player reconnects. The minimum is what keeps that ratchet from going below vanilla.
+        /// The real rate is SteamNetConnectionRealTimeStatus_t.m_nSendRateBytesPerSecond,
+        /// sampled as NetworkSample.TransportSendRateBytesPerSecond.
+        /// </remarks>
         public static bool ApplyConnectionLimits(
             ZSteamSocket socket,
             int minimumRateBytesPerSecond,
