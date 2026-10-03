@@ -18,6 +18,11 @@
     <ValheimInstall Condition="'$(ValheimInstall)' == ''">D:\valheim-ref</ValheimInstall>
     <ValheimManaged>$(ValheimInstall)\valheim_Data\Managed</ValheimManaged>
     <BepInExCore>$(ValheimInstall)\BepInEx\core</BepInExCore>
+    <!-- Sem {CandidateAssemblyFiles}: projeto SDK vira item todo arquivo da pasta, e o MSBuild
+         prefere esses DLLs ao HintPath. Ate a 0.4.0 o mod compilava contra a copia velha em
+         audit\ e as saidas de tests\*\bin, nao contra $(ValheimInstall); com o
+         ZRoutedRpc.Everybody virando const no Valheim de 26/09, isso quebrou o ServerSync. -->
+    <AssemblySearchPaths>{HintPathFromItem};{TargetFrameworkDirectory};{RawFileName}</AssemblySearchPaths>
   </PropertyGroup>
 
   <ItemGroup>
@@ -79,5 +84,11 @@
            Text="Valheim assemblies not found. Build with -p:ValheimInstall=&quot;path to Valheim&quot;." />
     <Error Condition="!Exists('$(BepInExCore)\BepInEx.dll')"
            Text="BepInEx 5 not found under $(ValheimInstall)." />
+  </Target>
+
+  <!-- Every game reference must come from the HintPath it names, never a stray copy elsewhere. -->
+  <Target Name="VerifyResolvedValheimReferences" AfterTargets="ResolveAssemblyReferences">
+    <Error Condition="'%(ReferencePath.HintPath)' != '' AND '%(ReferencePath.HintPath)' != '%(ReferencePath.FullPath)'"
+           Text="%(ReferencePath.Filename) resolved to %(ReferencePath.FullPath) instead of %(ReferencePath.HintPath)." />
   </Target>
 </Project>

@@ -6,7 +6,18 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>AssemblyGuardTests</AssemblyName>
+    <ValheimInstall Condition="'$(ValheimInstall)' == '' AND '$(VALHEIM_PATH)' != ''">$(VALHEIM_PATH)</ValheimInstall>
+    <ValheimInstall Condition="'$(ValheimInstall)' == ''">D:\valheim-ref</ValheimInstall>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The game assemblies AdaptiveNet compiles against, so the guard can resolve the game
+         fields the mod touches and catch a const loaded as a static field. -->
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>ValheimManaged</_Parameter1>
+      <_Parameter2>$(ValheimInstall)\valheim_Data\Managed</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
 
   <ItemGroup>
     <!-- The repo already vendors Cecil under audit/ for the game-assembly checks in

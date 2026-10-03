@@ -70,8 +70,27 @@ var splitInterfaces = new HashSet<string>(StringComparer.Ordinal)
     "Steamworks.SteamGameServerNetworkingUtils",
 };
 
+// The game assemblies AdaptiveNet compiled against, written in by the csproj from ValheimInstall,
+// so the literal-field guard (4.) can look at the fields the mod actually touches.
+string valheimManaged = typeof(Test).Assembly
+    .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+    .Cast<System.Reflection.AssemblyMetadataAttribute>()
+    .Single(attribute => attribute.Key == "ValheimManaged").Value ?? string.Empty;
+if (!File.Exists(Path.Combine(valheimManaged, "assembly_valheim.dll")))
+{
+    Console.Error.WriteLine(
+        $"Assembly guard tests need the Valheim assemblies AdaptiveNet builds against. Missing: {valheimManaged}\n" +
+        "Run with -p:ValheimInstall=\"path to Valheim\".");
+    return 1;
+}
+
 var callSites = new List<CallSite>();
-using (AssemblyDefinition assembly = AssemblyDefinition.ReadAssembly(assemblyPath))
+var literalFieldLoads = new List<CallSite>();
+int resolvedGameStaticFields = 0;
+using var resolver = new DefaultAssemblyResolver();
+resolver.AddSearchDirectory(valheimManaged);
+using (AssemblyDefinition assembly = AssemblyDefinition.ReadAssembly(
+           assemblyPath, new ReaderParameters { AssemblyResolver = resolver }))
 {
     foreach (TypeDefinition type in assembly.MainModule.GetTypes())
     {
@@ -80,6 +99,21 @@ using (AssemblyDefinition assembly = AssemblyDefinition.ReadAssembly(assemblyPat
             if (!method.HasBody) continue;
             foreach (Instruction instruction in method.Body.Instructions)
             {
+                if (instruction.Operand is FieldReference fieldReference &&
+                    IsStaticFieldAccess(instruction.OpCode.Code) &&
+                    TryResolve(fieldReference) is FieldDefinition field)
+                {
+                    if (field.Module.FileName.StartsWith(valheimManaged, StringComparison.OrdinalIgnoreCase))
+                    {
+                        resolvedGameStaticFields++;
+                    }
+                    if (field.IsLiteral)
+                    {
+                        literalFieldLoads.Add(new CallSite(
+                            type.FullName, method.Name, field.DeclaringType.FullName, field.Name));
+                    }
+                }
+
                 if (instruction.Operand is not MemberReference member) continue;
                 string declaring = member.DeclaringType?.FullName ?? string.Empty;
                 if (!splitInterfaces.Contains(declaring) && declaring != Dispatcher) continue;
@@ -117,8 +151,35 @@ AssertDispatched("AdaptiveNet.SteamTransport", "SetInt", "SetConfigValue",
 AssertDispatched("AdaptiveNet.PinnedSteamSender", "TryHandle", "SendMessageToConnection",
     "the pinned sender sends through the dispatcher");
 
+// 4. No static-field instruction names a const. A const is a `literal` field with no storage,
+//    and Mono refuses to JIT any method that loads one with ldsfld ("Using static instructions
+//    with literal field") — the whole method, not just that line, and only at runtime. Roslyn
+//    normally folds the value in, yet it emitted ldsfld for ZRoutedRpc.Everybody in the vendored
+//    ServerSync, which silently killed every config broadcast to connected clients.
+Test.True(resolvedGameStaticFields > 0,
+    "the scan resolved static fields of the game assemblies at all");
+Test.True(
+    literalFieldLoads.Count == 0,
+    "no static-field instruction targets a const (literal) field" + Describe(literalFieldLoads));
+
 Test.Summary();
 return 0;
+
+static bool IsStaticFieldAccess(Code code) =>
+    code == Code.Ldsfld || code == Code.Ldsflda || code == Code.Stsfld;
+
+static FieldDefinition? TryResolve(FieldReference reference)
+{
+    try
+    {
+        return reference.Resolve();
+    }
+    catch (AssemblyResolutionException)
+    {
+        // Framework assemblies are not on the search path; only the game's constants matter.
+        return null;
+    }
+}
 
 void AssertSymmetry(string memberName, string userType, string gameServerType)
 {
