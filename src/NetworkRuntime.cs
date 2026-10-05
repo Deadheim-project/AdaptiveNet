@@ -89,6 +89,16 @@ namespace AdaptiveNet
         public int UnownedNonPlayerCharacters { get; set; }
         public int ActiveIncidentId { get; set; }
         public int DroppedIncidentJobs { get; set; }
+        // Server side: ZNet.m_onlineBackend, "Steamworks" unless started with -crossplay.
+        public string OnlineBackend { get; set; } = string.Empty;
+        public LatencySummary RelayHold { get; set; }
+        public LatencySummary HitForward { get; set; }
+        public double ServiceGapMaximumMs { get; set; }
+        public int ZdoQueueRefusals { get; set; }
+        public double WorldSaveMs { get; set; }
+        public double MaximumClientHitUploadMs { get; set; }
+        // Client side: this client's own hit upload wait over its last report window.
+        public LatencySummary LocalHitUpload { get; set; }
     }
 
     internal static class NetworkRuntime
@@ -97,6 +107,10 @@ namespace AdaptiveNet
         // ZSteamSocket.RegisterGlobalCallbacks sets SendRateMin = SendRateMax = 153600.
         private const int VanillaSteamSendRateKiB = 150;
         private const double ManualMarkerIntervalSeconds = 30d;
+        // Server-wide: in PvP, everyone who loses a fight presses F9. Each manual capture dumps
+        // every player's history, so at most one starts per minute; later markers still ride
+        // along on a capture that is already open.
+        private const double ManualIncidentIntervalSeconds = 60d;
 
         private static readonly object Gate = new object();
         private static readonly Dictionary<ISocket, ConnectionContext> Connections =
@@ -132,7 +146,17 @@ namespace AdaptiveNet
         private static double _activeIncidentEndTime;
         private static double _nextAutomaticIncidentTime;
         private static string _pendingManualTrigger = string.Empty;
+        private static double _nextManualIncidentTime;
         private static bool _settingsChanged;
+        private static bool _onlineBackendChecked;
+        private static string _onlineBackend = string.Empty;
+        private static LatencySummary _lastClientHitUpload;
+        private static LatencySummary _logRelayHold;
+        private static LatencySummary _logHitForward;
+        private static double _logHitUploadMaximumMs;
+        private static double _logServiceGapMaximumMs;
+        private static int _logZdoQueueRefusals;
+        private static double _logWorldSaveMaximumMs;
 
         public static bool IsActive => _active;
         public static bool SchedulerEnabled => _settings != null && _settings.AdaptivePeerScheduler.Value;
@@ -149,6 +173,7 @@ namespace AdaptiveNet
             SteamInterface.Initialize(log);
             PinnedSteamSender.Initialize(log);
             ClientTelemetryRpc.Initialize(log);
+            PvpTelemetry.Initialize(log);
             CharacterOwnershipTelemetry.Reset();
             RuntimeHealthMonitor.Initialize(Time.realtimeSinceStartupAsDouble);
 
@@ -171,6 +196,16 @@ namespace AdaptiveNet
             _activeIncidentEndTime = 0d;
             _nextAutomaticIncidentTime = 0d;
             _pendingManualTrigger = string.Empty;
+            _nextManualIncidentTime = 0d;
+            _onlineBackendChecked = false;
+            _onlineBackend = string.Empty;
+            _lastClientHitUpload = default;
+            _logRelayHold = default;
+            _logHitForward = default;
+            _logHitUploadMaximumMs = 0d;
+            _logServiceGapMaximumMs = 0d;
+            _logZdoQueueRefusals = 0;
+            _logWorldSaveMaximumMs = 0d;
 
             SyncCsvTelemetry();
 
@@ -366,6 +401,7 @@ namespace AdaptiveNet
             bool dedicatedServer = ZNet.instance != null && ZNet.instance.IsDedicated();
             if (isServer)
             {
+                CheckOnlineBackendOnce();
                 EnsureIncidentWriter();
                 RefreshOwnershipIfDue(unscaledTime);
             }
@@ -373,6 +409,7 @@ namespace AdaptiveNet
             {
                 _pendingLocalHealth = RuntimeHealthSample.Merge(_pendingLocalHealth, intervalHealth);
             }
+            PvpWindow pvp = PvpTelemetry.TakeWindow();
 
             var seen = new HashSet<ISocket>(ReferenceComparer<ISocket>.Instance);
             var samples = new List<ConnectionContext>();
@@ -386,6 +423,8 @@ namespace AdaptiveNet
                 {
                     if (peer?.m_socket != null && peer.m_socket.IsConnected()) connectedPeers.Add(peer);
                 }
+                // Players inside the grouping radius are the ones who can fight each other.
+                PvpTelemetry.Refresh(connectedPeers, isServer, _settings.GroupRadiusMeters.Value);
 
                 double totalTransportWeight = 0d;
                 for (int index = 0; index < connectedPeers.Count; index++)
@@ -453,7 +492,9 @@ namespace AdaptiveNet
                         intervalHealth,
                         CharacterOwnershipTelemetry.ActiveNonPlayerCharacters,
                         CharacterOwnershipTelemetry.UnownedNonPlayerCharacters,
-                        CharacterOwnershipTelemetry.ServerOwnedNonPlayerCharacters);
+                        CharacterOwnershipTelemetry.ServerOwnedNonPlayerCharacters,
+                        pvp.Get(peer.m_uid),
+                        pvp.WorldSaveMilliseconds);
                     context.History.Add(point);
                     currentPoints.Add(point);
 
@@ -500,7 +541,8 @@ namespace AdaptiveNet
                 string serverAnomaly = DiagnosticAnomalyClassifier.ClassifyServer(
                     intervalHealth,
                     _settings.FrameStallThresholdMs.Value,
-                    Math.Max(_settings.FrameStallThresholdMs.Value, _settings.SevereFrameStallThresholdMs.Value));
+                    Math.Max(_settings.FrameStallThresholdMs.Value, _settings.SevereFrameStallThresholdMs.Value),
+                    pvp.WorldSaveMilliseconds);
                 if (!string.IsNullOrEmpty(serverAnomaly)) AppendTrigger(ref automaticTrigger, serverAnomaly);
                 ProcessIncidents(unscaledTime, currentPoints, automaticTrigger);
             }
@@ -510,7 +552,8 @@ namespace AdaptiveNet
             }
             RemoveStaleConnections(staleConnections);
 
-            _snapshot = BuildSnapshot(samples, intervalHealth, unscaledTime, isServer);
+            _snapshot = BuildSnapshot(samples, intervalHealth, unscaledTime, isServer, pvp);
+            AccumulatePvpForLog(_snapshot);
             DiagnosticsOverlay.SetSnapshot(_snapshot);
             _csv?.Write(unscaledTime, _snapshot);
             LogAggregateIfDue(unscaledTime);
@@ -584,6 +627,15 @@ namespace AdaptiveNet
             }
         }
 
+        /// <summary>
+        /// The budget SendZDOs' queue guard compares against: AdaptiveNet's when its transpiler is
+        /// in place, Valheim's otherwise. Lets the PvP probe tell a refusal from an idle attempt.
+        /// </summary>
+        public static int GetZdoGuardBudget(object peer)
+        {
+            return _zdoPatchApplied ? GetZdoQueueBudget(peer) : VanillaZdoQueueBudgetBytes;
+        }
+
         public static void ReportZdoPatchStatus(bool applied, string message)
         {
             _zdoPatchApplied = applied;
@@ -600,6 +652,7 @@ namespace AdaptiveNet
             _incidents?.Dispose();
             _incidents = null;
             ClientTelemetryRpc.Shutdown();
+            PvpTelemetry.Reset();
             CharacterOwnershipTelemetry.Reset();
             AdaptivePeerScheduler.Reset();
             PinnedSteamSender.Reset();
@@ -616,13 +669,15 @@ namespace AdaptiveNet
             if (!_settings.IncidentTelemetry.Value || now < _nextClientReportTime) return;
             _nextClientReportTime = now + EffectiveClientReportIntervalSeconds();
             NetworkSample network = samples.Count > 0 ? samples[0].LastSample : default;
+            _lastClientHitUpload = PvpTelemetry.TakeClientHitUpload();
             ClientTelemetryRpc.Send(
                 _pendingLocalHealth,
                 network,
                 now,
                 _clientFocusedThroughoutWindow,
                 _clientPlayerReadyThroughoutWindow,
-                _clientTeleportingDuringWindow);
+                _clientTeleportingDuringWindow,
+                _lastClientHitUpload);
             _pendingLocalHealth = default;
             ResetClientContextWindow();
         }
@@ -709,9 +764,22 @@ namespace AdaptiveNet
                 return;
             }
 
-            string trigger = hasManualTrigger
-                ? manualTrigger
-                : now >= _nextAutomaticIncidentTime ? automaticTrigger : string.Empty;
+            bool manualCanStart = hasManualTrigger && now >= _nextManualIncidentTime;
+            string trigger;
+            if (manualCanStart)
+            {
+                trigger = manualTrigger;
+            }
+            else
+            {
+                trigger = now >= _nextAutomaticIncidentTime ? automaticTrigger : string.Empty;
+                // A marker over the server-wide limit still names itself on any capture it meets.
+                if (hasManualTrigger && !string.IsNullOrEmpty(trigger)) AppendTrigger(ref trigger, manualTrigger);
+                else if (hasManualTrigger)
+                {
+                    _log.LogDebug($"diagnostic marker not captured (one manual capture per {ManualIncidentIntervalSeconds:F0} s): {manualTrigger}");
+                }
+            }
             // IncidentTelemetry is checked here, not only where the writer is created: turned off
             // with the server running, the writer stays alive but no new capture starts.
             if (string.IsNullOrEmpty(trigger) ||
@@ -730,6 +798,7 @@ namespace AdaptiveNet
             _activeIncidentTrigger = trigger;
             _activeIncidentEndTime = now + _settings.IncidentPostSeconds.Value;
             _nextAutomaticIncidentTime = now + _settings.IncidentCooldownSeconds.Value;
+            if (manualCanStart) _nextManualIncidentTime = now + ManualIncidentIntervalSeconds;
             _incidents.QueueHistories(
                 _activeIncidentId,
                 "pre",
@@ -739,6 +808,30 @@ namespace AdaptiveNet
             _log.LogWarning(
                 $"diagnostic incident #{_activeIncidentId} started: {trigger}; " +
                 $"preserved up to {_settings.HistorySeconds.Value}s before and will capture {_settings.IncidentPostSeconds.Value}s after.");
+        }
+
+        /// <summary>
+        /// The Deadheim PvP server is Steam-only. Started with -crossplay, players can arrive over
+        /// PlayFab, which gets none of the Steam transport tuning, pinned send or hit-queue probes,
+        /// and ServerSync then wraps every player's socket for the whole session. Say so once, at
+        /// warning level, where the admin reads the startup log.
+        /// </summary>
+        private static void CheckOnlineBackendOnce()
+        {
+            if (_onlineBackendChecked) return;
+            _onlineBackendChecked = true;
+            OnlineBackendType backend = ZNet.m_onlineBackend;
+            _onlineBackend = backend.ToString();
+            if (backend == OnlineBackendType.Steamworks)
+            {
+                _log.LogInfo("Online backend: Steamworks (Steam-only). Every player gets the Steam transport tuning and the PvP probes.");
+                return;
+            }
+
+            _log.LogWarning(
+                $"Online backend: {backend}. This server was started with -crossplay: players joining over PlayFab " +
+                "get no Steam transport tuning and no hit-queue measurements. AdaptiveNet's PvP setup expects a " +
+                "Steam-only server; remove -crossplay from the launch line.");
         }
 
         private static void EnsureIncidentWriter()
@@ -973,7 +1066,8 @@ namespace AdaptiveNet
             List<ConnectionContext> contexts,
             RuntimeHealthSample localHealth,
             double now,
-            bool isServer)
+            bool isServer,
+            PvpWindow pvp)
         {
             var snapshot = new DiagnosticsSnapshot
             {
@@ -990,7 +1084,14 @@ namespace AdaptiveNet
                 ActiveNonPlayerCharacters = CharacterOwnershipTelemetry.ActiveNonPlayerCharacters,
                 UnownedNonPlayerCharacters = CharacterOwnershipTelemetry.UnownedNonPlayerCharacters,
                 ActiveIncidentId = _activeIncidentId,
-                DroppedIncidentJobs = _incidents?.DroppedJobs ?? 0
+                DroppedIncidentJobs = _incidents?.DroppedJobs ?? 0,
+                OnlineBackend = isServer ? _onlineBackend : string.Empty,
+                RelayHold = pvp.RelayHold,
+                HitForward = pvp.HitForward,
+                ServiceGapMaximumMs = pvp.ServiceGapMaximumMilliseconds,
+                ZdoQueueRefusals = pvp.QueueRefusals,
+                WorldSaveMs = pvp.WorldSaveMilliseconds,
+                LocalHitUpload = isServer ? default : _lastClientHitUpload
             };
             SchedulerSnapshot scheduler = AdaptivePeerScheduler.Snapshot;
             snapshot.GroupedPeers = scheduler.GroupedPeers;
@@ -1029,6 +1130,7 @@ namespace AdaptiveNet
                     !item.LastClientSnapshot.Available && now - item.ConnectedAt >= EffectiveClientReportMissingSeconds());
                 snapshot.MaximumClientFrameMs = contexts.Max(item => item.LastClientSnapshot.Health.MaximumFrameMilliseconds);
                 snapshot.MaximumClientReportDelayMs = contexts.Max(item => item.LastClientSnapshot.DeliveryDelayMilliseconds);
+                snapshot.MaximumClientHitUploadMs = contexts.Max(item => item.LastClientSnapshot.HitUpload.MaximumMilliseconds);
             }
             return snapshot;
         }
@@ -1037,7 +1139,11 @@ namespace AdaptiveNet
         {
             if (_settings.LogIntervalSeconds.Value <= 0f || now < _nextLogTime) return;
             _nextLogTime = now + _settings.LogIntervalSeconds.Value;
-            if (_snapshot.PeerCount <= 0) return;
+            if (_snapshot.PeerCount <= 0)
+            {
+                FormatPvpSummaryAndReset(_snapshot);
+                return;
+            }
             _log.LogInfo(
                 $"telemetry peers={_snapshot.PeerCount}, networkSamples={_snapshot.NetworkSamplePeers}, ping(avg/p95)={_snapshot.AveragePingMs:F0}/{_snapshot.P95PingMs:F0}ms, " +
                 $"queued={_snapshot.TotalQueuedBytes / 1024d:F1}KiB, queueMax={_snapshot.MaximumQueueDelayMs:F1}ms, " +
@@ -1048,7 +1154,46 @@ namespace AdaptiveNet
                 $"clientReports={_snapshot.ClientTelemetryPeers}/{_snapshot.PeerCount}, missing={_snapshot.MissingClientReports}, " +
                 $"clientFrameMax={_snapshot.MaximumClientFrameMs:F0}ms, reportDelayMax={_snapshot.MaximumClientReportDelayMs:F0}ms, " +
                 $"mobs={_snapshot.ActiveNonPlayerCharacters}, incident={_snapshot.ActiveIncidentId}, " +
-                $"sched={_snapshot.SchedulerAttemptsPerSecond:F0}/s, budgetStops={_snapshot.SchedulerBudgetStopsPerSecond}/s");
+                $"sched={_snapshot.SchedulerAttemptsPerSecond:F0}/s, budgetStops={_snapshot.SchedulerBudgetStopsPerSecond}/s" +
+                FormatPvpSummaryAndReset(_snapshot));
+        }
+
+        /// <summary>
+        /// Folds one sample window of PvP probes into the periodic log line, which would otherwise
+        /// show only the last second of a 15-second interval and miss the spike a fight produces.
+        /// </summary>
+        private static void AccumulatePvpForLog(DiagnosticsSnapshot snapshot)
+        {
+            _logRelayHold = LatencySummary.Merge(_logRelayHold, snapshot.RelayHold);
+            _logHitForward = LatencySummary.Merge(_logHitForward, snapshot.HitForward);
+            _logHitUploadMaximumMs = Math.Max(_logHitUploadMaximumMs, snapshot.MaximumClientHitUploadMs);
+            _logServiceGapMaximumMs = Math.Max(_logServiceGapMaximumMs, snapshot.ServiceGapMaximumMs);
+            _logZdoQueueRefusals += snapshot.ZdoQueueRefusals;
+            _logWorldSaveMaximumMs = Math.Max(_logWorldSaveMaximumMs, snapshot.WorldSaveMs);
+        }
+
+        /// <summary>
+        /// The PvP probes since the previous log line: relay hold of nearby players' positions,
+        /// hit RPC wait toward the target and from the attacker, the longest gap between ZDO sends
+        /// to one player, queue refusals and the longest world save. p95 is the worst one-second p95.
+        /// </summary>
+        private static string FormatPvpSummaryAndReset(DiagnosticsSnapshot snapshot)
+        {
+            string summary = string.IsNullOrEmpty(snapshot.OnlineBackend)
+                ? string.Empty
+                : $", backend={snapshot.OnlineBackend}, " +
+                  $"relayHold(n/p95/max)={_logRelayHold.Count}/{_logRelayHold.P95Milliseconds:F0}/{_logRelayHold.MaximumMilliseconds:F0}ms, " +
+                  $"hitWait(n/p95/max)={_logHitForward.Count}/{_logHitForward.P95Milliseconds:F0}/{_logHitForward.MaximumMilliseconds:F0}ms, " +
+                  $"hitUploadMax={_logHitUploadMaximumMs:F0}ms, " +
+                  $"serviceGapMax={_logServiceGapMaximumMs:F0}ms, zdoRefused={_logZdoQueueRefusals}" +
+                  (_logWorldSaveMaximumMs > 0d ? $", worldSave={_logWorldSaveMaximumMs:F0}ms" : string.Empty);
+            _logRelayHold = default;
+            _logHitForward = default;
+            _logHitUploadMaximumMs = 0d;
+            _logServiceGapMaximumMs = 0d;
+            _logZdoQueueRefusals = 0;
+            _logWorldSaveMaximumMs = 0d;
+            return summary;
         }
 
         private static string FormatQuality(double value)

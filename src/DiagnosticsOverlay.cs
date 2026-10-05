@@ -28,7 +28,7 @@ namespace AdaptiveNet
             }
 
             DiagnosticsSnapshot value = _snapshot;
-            var bounds = new Rect(18f, 90f, 500f, value.Conflicts.Length > 0 ? 278f : 258f);
+            var bounds = new Rect(18f, 90f, 500f, value.Conflicts.Length > 0 ? 299f : 279f);
             GUI.Box(bounds, "AdaptiveNet");
             float y = bounds.y + 28f;
             DrawLine(ref y, $"Mode: {value.EffectiveMode}   Peers: {value.PeerCount}   Congested: {value.CongestedPeers}");
@@ -41,6 +41,9 @@ namespace AdaptiveNet
             DrawLine(ref y, $"Client reports: {value.ClientTelemetryPeers}/{value.PeerCount}   missing: {value.MissingClientReports}");
             DrawLine(ref y, $"Client frame/report delay max: {value.MaximumClientFrameMs:F0}/{value.MaximumClientReportDelayMs:F0} ms");
             DrawLine(ref y, $"Active mobs: {value.ActiveNonPlayerCharacters}   incident: {value.ActiveIncidentId}");
+            DrawLine(ref y, string.IsNullOrEmpty(value.OnlineBackend)
+                ? $"My hit upload wait avg/max: {value.LocalHitUpload.AverageMilliseconds:F0}/{value.LocalHitUpload.MaximumMilliseconds:F0} ms ({value.LocalHitUpload.Count} hits)"
+                : $"PvP relay p95/max: {value.RelayHold.P95Milliseconds:F0}/{value.RelayHold.MaximumMilliseconds:F0} ms   hit wait max: {value.HitForward.MaximumMilliseconds:F0} ms");
             DrawLine(ref y, value.ZdoPatchApplied ? "ZDO patch: verified" : "ZDO patch: safe fallback");
             if (value.Conflicts.Length > 0)
             {

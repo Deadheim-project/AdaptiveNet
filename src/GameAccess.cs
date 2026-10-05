@@ -14,12 +14,15 @@ namespace AdaptiveNet
     /// </summary>
     internal static class GameAccess
     {
+        private delegate bool PeerZdoRevisionGetter(object zdoPeer, ZDOID id, out uint dataRevision);
+
         private static Func<ZSteamSocket, HSteamNetConnection> _getConnection;
         private static Func<ZSteamSocket, Queue<byte[]>> _getSendQueue;
         private static Action<ZSteamSocket, int> _addTotalSent;
         private static Func<ZDOMan, IList> _getZdoPeers;
         private static Func<object, ZNetPeer> _getZNetPeer;
         private static Func<ZDOMan, object, bool, bool> _sendZdos;
+        private static PeerZdoRevisionGetter _getPeerZdoRevision;
 
         public static void Initialize()
         {
@@ -35,6 +38,16 @@ namespace AdaptiveNet
             _getZdoPeers = CreateListGetter("m_peers");
             _getZNetPeer = CreateObjectFieldGetter<ZNetPeer>(zdoPeerType, "m_peer");
             _sendZdos = CreateSendZdos(zdoPeerType);
+
+            // Diagnostic only: a game update that reshapes it costs the PvP relay probe, not the mod.
+            try
+            {
+                _getPeerZdoRevision = CreatePeerZdoRevisionGetter(zdoPeerType);
+            }
+            catch (Exception)
+            {
+                _getPeerZdoRevision = null;
+            }
         }
 
         public static HSteamNetConnection GetConnection(ZSteamSocket socket) => _getConnection(socket);
@@ -43,6 +56,14 @@ namespace AdaptiveNet
         public static IList GetZdoPeers(ZDOMan manager) => _getZdoPeers(manager);
         public static ZNetPeer GetZNetPeer(object zdoPeer) => zdoPeer == null ? null : _getZNetPeer(zdoPeer);
         public static bool SendZdos(ZDOMan manager, object zdoPeer, bool flush) => _sendZdos(manager, zdoPeer, flush);
+        public static bool PeerZdoRevisionAvailable => _getPeerZdoRevision != null;
+
+        /// <summary>The data revision of <paramref name="id"/> the server last sent to this ZDOPeer.</summary>
+        public static bool TryGetPeerZdoRevision(object zdoPeer, ZDOID id, out uint dataRevision)
+        {
+            dataRevision = 0;
+            return zdoPeer != null && _getPeerZdoRevision != null && _getPeerZdoRevision(zdoPeer, id, out dataRevision);
+        }
 
         private static Func<TTarget, TValue> CreateFieldGetter<TTarget, TValue>(string name)
         {
@@ -123,6 +144,59 @@ namespace AdaptiveNet
             il.Emit(OpCodes.Ret);
             return (Func<ZDOMan, object, bool, bool>)method.CreateDelegate(
                 typeof(Func<ZDOMan, object, bool, bool>));
+        }
+
+        /// <summary>
+        /// ((ZDOPeer)peer).m_zdos.TryGetValue(id, out PeerZDOInfo info) and info.m_dataRevision,
+        /// for the ZDOPeer and PeerZDOInfo types that are not visible to the mod.
+        /// </summary>
+        private static PeerZdoRevisionGetter CreatePeerZdoRevisionGetter(Type peerType)
+        {
+            FieldInfo zdos = peerType.GetField("m_zdos", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            Type infoType = peerType.GetNestedType("PeerZDOInfo", BindingFlags.Public | BindingFlags.NonPublic);
+            if (zdos == null || infoType == null)
+            {
+                throw new MissingFieldException(peerType.FullName, "m_zdos");
+            }
+
+            Type dictionaryType = typeof(Dictionary<,>).MakeGenericType(typeof(ZDOID), infoType);
+            if (zdos.FieldType != dictionaryType)
+            {
+                throw new MissingFieldException(peerType.FullName, "m_zdos");
+            }
+            FieldInfo dataRevision = RequireField(infoType, "m_dataRevision", typeof(uint));
+            MethodInfo tryGetValue = dictionaryType.GetMethod(
+                "TryGetValue", new[] { typeof(ZDOID), infoType.MakeByRefType() });
+            if (tryGetValue == null)
+            {
+                throw new MissingMethodException(dictionaryType.FullName, "TryGetValue");
+            }
+
+            var method = new DynamicMethod("AdaptiveNet_GetPeerZdoRevision", typeof(bool),
+                new[] { typeof(object), typeof(ZDOID), typeof(uint).MakeByRefType() }, typeof(GameAccess), true);
+            ILGenerator il = method.GetILGenerator();
+            LocalBuilder info = il.DeclareLocal(infoType);
+            Label notFound = il.DefineLabel();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Castclass, peerType);
+            il.Emit(OpCodes.Ldfld, zdos);
+            il.Emit(OpCodes.Ldarg_1);
+            il.Emit(OpCodes.Ldloca_S, info);
+            il.Emit(OpCodes.Callvirt, tryGetValue);
+            il.Emit(OpCodes.Brfalse_S, notFound);
+            il.Emit(OpCodes.Ldarg_2);
+            il.Emit(infoType.IsValueType ? OpCodes.Ldloca_S : OpCodes.Ldloc_S, info);
+            il.Emit(OpCodes.Ldfld, dataRevision);
+            il.Emit(OpCodes.Stind_I4);
+            il.Emit(OpCodes.Ldc_I4_1);
+            il.Emit(OpCodes.Ret);
+            il.MarkLabel(notFound);
+            il.Emit(OpCodes.Ldarg_2);
+            il.Emit(OpCodes.Ldc_I4_0);
+            il.Emit(OpCodes.Stind_I4);
+            il.Emit(OpCodes.Ldc_I4_0);
+            il.Emit(OpCodes.Ret);
+            return (PeerZdoRevisionGetter)method.CreateDelegate(typeof(PeerZdoRevisionGetter));
         }
 
         private static FieldInfo RequireField(Type owner, string name, Type fieldType)

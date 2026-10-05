@@ -6,7 +6,9 @@ namespace AdaptiveNet
 {
     internal readonly struct ClientTelemetryReport
     {
-        public const int CurrentProtocol = 1;
+        // 2 appends the client's hit-RPC upload wait. ServerSync already holds client and server
+        // to the same AdaptiveNet version, so only the current protocol is accepted.
+        public const int CurrentProtocol = 2;
 
         public ClientTelemetryReport(
             long sequence,
@@ -15,7 +17,8 @@ namespace AdaptiveNet
             bool playerReady,
             bool teleporting,
             RuntimeHealthSample health,
-            NetworkSample uploadNetwork)
+            NetworkSample uploadNetwork,
+            LatencySummary hitUpload = default)
         {
             Sequence = sequence;
             ClientMonotonicSeconds = clientMonotonicSeconds;
@@ -24,6 +27,7 @@ namespace AdaptiveNet
             Teleporting = teleporting;
             Health = health;
             UploadNetwork = uploadNetwork;
+            HitUpload = hitUpload;
         }
 
         public long Sequence { get; }
@@ -33,6 +37,8 @@ namespace AdaptiveNet
         public bool Teleporting { get; }
         public RuntimeHealthSample Health { get; }
         public NetworkSample UploadNetwork { get; }
+        /// <summary>How long the hit RPCs this client sent waited in its own send queue.</summary>
+        public LatencySummary HitUpload { get; }
 
         public ZPackage Serialize()
         {
@@ -69,6 +75,10 @@ namespace AdaptiveNet
             package.Write((float)UploadNetwork.IncomingBytesPerSecond);
             package.Write((float)UploadNetwork.OutgoingPacketsPerSecond);
             package.Write((float)UploadNetwork.IncomingPacketsPerSecond);
+            package.Write(HitUpload.Count);
+            package.Write((float)HitUpload.AverageMilliseconds);
+            package.Write((float)HitUpload.P95Milliseconds);
+            package.Write((float)HitUpload.MaximumMilliseconds);
             return package;
         }
 
@@ -126,6 +136,13 @@ namespace AdaptiveNet
                 double incoming = Finite(package.ReadSingle(), 0d, int.MaxValue);
                 double outgoingPackets = Finite(package.ReadSingle(), 0d, 10000000d);
                 double incomingPackets = Finite(package.ReadSingle(), 0d, 10000000d);
+                int hitCount = Clamp(package.ReadInt(), 0, 100000);
+                double hitAverage = Finite(package.ReadSingle(), 0d, 60000d);
+                double hitP95 = Finite(package.ReadSingle(), 0d, 60000d);
+                double hitMaximum = Finite(package.ReadSingle(), 0d, 60000d);
+                var hitUpload = hitCount > 0
+                    ? new LatencySummary(hitCount, hitAverage, hitP95, hitMaximum)
+                    : default;
                 var network = new NetworkSample(
                     networkValid,
                     ping,
@@ -148,7 +165,8 @@ namespace AdaptiveNet
                     playerReady,
                     teleporting,
                     health,
-                    network);
+                    network,
+                    hitUpload);
                 return sequence >= 0 && clientTime > 0d;
             }
             catch
@@ -182,7 +200,8 @@ namespace AdaptiveNet
             double deliveryDelayMilliseconds,
             double reportAgeSeconds,
             RuntimeHealthSample health,
-            NetworkSample uploadNetwork)
+            NetworkSample uploadNetwork,
+            LatencySummary hitUpload = default)
         {
             Available = available;
             Fresh = fresh;
@@ -195,6 +214,7 @@ namespace AdaptiveNet
             ReportAgeSeconds = Math.Max(0d, reportAgeSeconds);
             Health = health;
             UploadNetwork = uploadNetwork;
+            HitUpload = hitUpload;
         }
 
         public bool Available { get; }
@@ -208,12 +228,15 @@ namespace AdaptiveNet
         public double ReportAgeSeconds { get; }
         public RuntimeHealthSample Health { get; }
         public NetworkSample UploadNetwork { get; }
+        /// <summary>Hit RPC upload wait over every report merged into this snapshot.</summary>
+        public LatencySummary HitUpload { get; }
     }
 
     internal sealed class RemoteClientTelemetryState
     {
         private readonly DeliveryDelayEstimator _delay = new DeliveryDelayEstimator();
         private RuntimeHealthSample _mergedHealth;
+        private LatencySummary _mergedHitUpload;
         private NetworkSample _latestNetwork;
         private bool _focused;
         private bool _playerReady;
@@ -246,6 +269,8 @@ namespace AdaptiveNet
                 _teleporting |= report.Teleporting;
             }
             _available = true;
+            // Every report counts its own hits, so none may be dropped by the 64-report cap below.
+            _mergedHitUpload = LatencySummary.Merge(_mergedHitUpload, report.HitUpload);
             if (_reportsMerged < 64)
             {
                 _mergedHealth = RuntimeHealthSample.Merge(_mergedHealth, report.Health);
@@ -278,8 +303,10 @@ namespace AdaptiveNet
                 delay,
                 silenceSeconds,
                 _mergedHealth,
-                _latestNetwork);
+                _latestNetwork,
+                _mergedHitUpload);
             _mergedHealth = default;
+            _mergedHitUpload = default;
             _reportsMerged = 0;
             _maximumExcessDelay = 0d;
             return snapshot;
@@ -326,7 +353,8 @@ namespace AdaptiveNet
             double now,
             bool focusedThroughoutInterval,
             bool playerReadyThroughoutInterval,
-            bool teleportingDuringInterval)
+            bool teleportingDuringInterval,
+            LatencySummary hitUpload)
         {
             if (ZRoutedRpc.instance == null || ZNet.instance == null || ZNet.instance.IsServer()) return;
             var report = new ClientTelemetryReport(
@@ -336,7 +364,8 @@ namespace AdaptiveNet
                 playerReadyThroughoutInterval,
                 teleportingDuringInterval,
                 health,
-                network);
+                network,
+                hitUpload);
             try
             {
                 ZRoutedRpc.instance.InvokeRoutedRPC(TelemetryRpcName, report.Serialize());

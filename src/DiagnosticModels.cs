@@ -228,8 +228,16 @@ namespace AdaptiveNet.Core
         public static string ClassifyServer(
             RuntimeHealthSample serverHealth,
             double frameStallThresholdMilliseconds,
-            double severeFrameStallThresholdMilliseconds)
+            double severeFrameStallThresholdMilliseconds,
+            double worldSaveMilliseconds = 0d)
         {
+            // Valheim prepares a world save on the main thread (ZDOMan.PrepareSave), freezing every
+            // player at once. Naming it keeps a routine save from reading as an unexplained stall,
+            // while a long one still opens a capture.
+            if (worldSaveMilliseconds >= frameStallThresholdMilliseconds)
+            {
+                return "server-world-save";
+            }
             if (serverHealth.GcCorrelatedStallMilliseconds >= frameStallThresholdMilliseconds)
             {
                 return "server-gc-correlated-stall";

@@ -58,6 +58,40 @@ namespace AdaptiveNet
             return true;
         }
 
+        /// <summary>
+        /// How long a message queued on this connection right now would wait before it starts
+        /// going out: Steam's own estimate for its pending data, plus Valheim's managed queue in
+        /// front of it drained at the connection's real send rate. Everything Valheim sends rides
+        /// one reliable, ordered lane, so this is also what a hit RPC waits behind ZDO data.
+        /// </summary>
+        public static bool TryGetQueueWait(ZSteamSocket socket, out double waitMilliseconds)
+        {
+            waitMilliseconds = 0d;
+            HSteamNetConnection connection = socket == null ? HSteamNetConnection.Invalid : GameAccess.GetConnection(socket);
+            if (socket == null || connection == HSteamNetConnection.Invalid)
+            {
+                return false;
+            }
+
+            var status = default(SteamNetConnectionRealTimeStatus_t);
+            var lanes = default(SteamNetConnectionRealTimeLaneStatus_t);
+            if (SteamInterface.GetConnectionRealTimeStatus(connection, ref status, 0, ref lanes) != EResult.k_EResultOK)
+            {
+                return false;
+            }
+
+            int managedQueueBytes = 0;
+            foreach (byte[] packet in GameAccess.GetSendQueue(socket))
+            {
+                managedQueueBytes += packet?.Length ?? 0;
+            }
+
+            double steamQueueMilliseconds = Math.Max(0d, status.m_usecQueueTime.m_SteamNetworkingMicroseconds / 1000d);
+            double managedQueueMilliseconds = managedQueueBytes * 1000d / Math.Max(1, status.m_nSendRateBytesPerSecond);
+            waitMilliseconds = steamQueueMilliseconds + managedQueueMilliseconds;
+            return true;
+        }
+
         /// <remarks>
         /// Steam does not estimate bandwidth (Valve's SNP_ClampSendRate, verified 2026-10-03):
         /// each connection keeps one rate, set when it connects — Valheim's global

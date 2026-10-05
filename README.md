@@ -22,6 +22,7 @@ O mod é independente e não precisa de nenhum outro mod de rede. Não o execute
 - BepInEx 5.4.23 ou compatível instalado no servidor.
 - Conexão Steam para receber todas as otimizações de transporte. Num servidor crossplay, quem conecta por socket Steam recebe todas; conexões PlayFab ficam com o escalonador e a cota de ZDO. O ServerSync de cada mod deixa o socket do jogador embrulhado num `BufferingSocket` a sessão inteira em servidor crossplay; o AdaptiveNet mede e ajusta a conexão real por baixo deles (até a 0.4.1 não media, e a cota de ZDO ficava no valor vanilla).
 - Em uso server-only, clientes vanilla ainda conectam. Para corrigir também a fila de upload dos jogadores neste modpack obrigatório, distribua o mesmo DLL aos clientes.
+- O servidor PvP do Deadheim é **somente Steam**: inicie o `valheim_server` sem `-crossplay`. Ao subir, o log diz `Online backend: Steamworks (Steam-only)`; com `-crossplay` a linha vira um aviso, porque quem entra por PlayFab fica sem os ajustes Steam e sem as medidas de golpe.
 
 AdaptiveNet e VBNetTweaks não podem operar juntos. Remova o VBNetTweaks do servidor e do manifesto do launcher antes do teste A/B; apenas desligar algumas opções não remove seus patches carregados.
 
@@ -82,6 +83,8 @@ O jogo não é bloqueado para escrever o CSV: um thread em segundo plano possui 
 
 Quando perceber teleporte, ações atrasadas ou dano chegando tarde, o jogador deve pressionar **F9** assim que possível. Isso pede ao servidor para preservar o minuto anterior e continuar coletando por mais 15 segundos. Se já houver uma captura ativa, o marcador é anexado ao mesmo incidente. O servidor aceita um marcador por jogador a cada 30 segundos e ignora os demais, para que ninguém mantenha a caixa-preta ocupada segurando F9.
 
+Em PvP, todo mundo que perde uma luta aperta F9. Por isso, além do limite por jogador, o servidor inicia **no máximo uma captura manual por minuto**. Um marcador acima desse limite ainda entra no `trigger` de qualquer captura que esteja aberta ou que comece naquele instante; sozinho, ele só aparece no log em nível debug.
+
 F8 continua abrindo o overlay. Ele mostra FPS/frame local, quantidade de clientes reportando, maior atraso dos relatórios e o número do incidente ativo.
 
 ### Como interpretar
@@ -97,10 +100,28 @@ Alguns rótulos importantes na coluna `trigger`:
 | `client-frame-stall` / `server-frame-stall` | O processo ficou sem produzir frame por tempo excessivo. |
 | `client-gc-correlated-stall` / `server-gc-correlated-stall` | Houve coleta de GC no mesmo frame travado; é correlação, não prova isolada de causalidade. |
 | `client-report-missing` | O cliente conectado não entregou nenhum relatório compatível no prazo. |
+| `server-world-save` | O save do mundo prendeu a thread principal do servidor por mais que `FrameStallThresholdMs`; todos os jogadores congelaram juntos. A duração está em `server_world_save_ms`. |
 
 Os campos `server_*` mostram a visão do servidor para aquele jogador. Os campos `client_*` vêm do cliente e mostram a direção de upload dele. Comparar os dois permite separar rota ruim, fila cliente→servidor, travada do cliente e travada global do servidor. `owned_nonplayer_characters` conta somente personagens/mobs ativos atribuídos ao jogador; esta versão não transfere ownership.
 
 Alt-tab, jogador ainda sem personagem e teleporte real são marcados no relatório e não disparam sozinhos uma anomalia de frame. O mod nunca chama `GC.Collect()`.
+
+## Telemetria de PvP
+
+No Valheim, o atacante acerta onde ele vê a vítima, e o bloqueio/parry é decidido no cliente da vítima quando o `RPC_Damage` chega. Tudo o que o jogo manda — ZDOs e RPCs de dano — vai numa única fila confiável e ordenada por conexão, então um golpe espera atrás dos ZDOs já enfileirados. A partir da 0.5.0 o servidor mede as partes desse atraso que dependem dele:
+
+| Medida | O que é | Onde aparece |
+|---|---|---|
+| Retenção de posição (`relayHold`) | Quanto tempo uma posição nova de um jogador ficou no servidor até cada outro jogador **dentro de `GroupRadiusMeters`** recebê-la. É o atraso que a cadência do escalonador acrescenta. A primeira cópia depois de alguém entrar no raio não conta: é visibilidade, não atraso. | log (`relayHold(n/p95/max)`), CSV agregado, CSV de incidentes (`relay_hold_*`) |
+| Espera do golpe até a vítima (`hitWait`) | Estimativa de quanto um `RPC_Damage`, `RPC_Stagger` ou `RPC_HitWhileDodging` encaminhado **a um jogador** esperou na fila de envio Steam dele. Golpes em mobs ficam de fora. | log, CSV agregado, CSV de incidentes (`hit_forward_*`) |
+| Espera do golpe no atacante (`hitUpload`) | O mesmo, medido no cliente para os golpes em jogadores que ele envia ao servidor, e reportado no relatório cliente→servidor. | log (`hitUploadMax`), CSV de incidentes (`client_hit_upload_*`), overlay F8 do cliente |
+| Intervalo de atendimento (`serviceGapMax`) | Maior tempo entre duas tentativas de envio de ZDO para um mesmo jogador, incluindo uma que ainda não aconteceu. | log, CSVs (`zdo_service_gap_max_ms`) |
+| Recusas da fila (`zdoRefused`) | Tentativas de envio de ZDO que a guarda de fila recusou porque a conexão já estava cheia. | log, CSVs (`zdo_queue_refusals`) |
+| Save do mundo (`worldSave`) | Tempo em que `ZNet.SaveWorld` prendeu a thread principal. Também vai para o log a cada save. | log, CSVs, rótulo `server-world-save` |
+
+As medidas vêm do caminho de envio do próprio Valheim. Por isso funcionam igual com o escalonador ligado ou com `Mode = ObserveOnly`, o que permite comparar os dois com os mesmos jogadores. Elas só observam: nada muda no que o jogo envia, e uma falha desliga as medidas com um aviso, sem afetar a rede. O relatório cliente→servidor passou ao protocolo 2; servidor e launcher precisam estar na 0.5.0 juntos.
+
+Na linha periódica do log, `n` e `max` cobrem todo o intervalo do log; o `p95` é o pior p95 de um segundo dentro dele.
 
 ## Preset para 30 jogadores
 
@@ -164,7 +185,11 @@ Indicadores úteis:
 - `scheduler_budget_stops_s`: frames por segundo em que o limite de CPU encerrou o trabalho.
 - `local_frame_max_ms`: maior frame do servidor ou cliente que gravou o CSV agregado;
 - `missing_client_reports`: clientes conectados sem telemetria compatível;
-- `client_report_delay_max_ms`: maior atraso adicional estimado de um relatório cliente→servidor.
+- `client_report_delay_max_ms`: maior atraso adicional estimado de um relatório cliente→servidor;
+- `relay_hold_p95_ms` / `relay_hold_max_ms`: quanto as posições de jogadores próximos ficam paradas no servidor (veja [Telemetria de PvP](#telemetria-de-pvp));
+- `hit_forward_p95_ms` / `hit_forward_max_ms`: espera de um golpe na fila da vítima; `client_hit_upload_max_ms`, na fila do atacante;
+- `zdo_service_gap_max_ms` e `zdo_queue_refusals`: se algum jogador ficou sem atendimento ou com a fila cheia;
+- `world_save_ms`: duração do último save do mundo na thread principal.
 
 Para analisar um relato, guarde o CSV `incidents-*`, o `BepInEx/LogOutput.log` do servidor, o nome do jogador e o horário aproximado. O CSV já contém a linha do tempo dos demais jogadores, permitindo comparar um afetado com outro saudável no mesmo instante.
 

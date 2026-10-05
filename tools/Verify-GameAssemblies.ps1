@@ -88,6 +88,26 @@ foreach ($install in $ValheimInstalls) {
             'm_localPlayer' -in $player.Fields.Name -and
             'IsTeleporting' -in $player.Methods.Name
 
+        # PvP probes (PvpProbePatches, GameAccess.TryGetPeerZdoRevision). Each probe declines on its
+        # own when its target is gone, so a miss here costs that measurement, not the mod.
+        $zdoPeer = $zdoMan.NestedTypes | Where-Object Name -EQ 'ZDOPeer'
+        $peerZdoInfo = if ($zdoPeer) { $zdoPeer.NestedTypes | Where-Object Name -EQ 'PeerZDOInfo' }
+        $zdoData = $zdoMan.Methods | Where-Object { $_.Name -eq 'RPC_ZDOData' -and $_.Parameters.Count -eq 2 }
+        $routeRpc = $routedRpc.Methods | Where-Object { $_.Name -eq 'RouteRPC' -and $_.Parameters.Count -eq 1 }
+        $routedData = $routedRpc.NestedTypes | Where-Object Name -EQ 'RoutedRPCData'
+        $znet = $assembly.MainModule.Types | Where-Object Name -EQ 'ZNet'
+        $znetPeer = $assembly.MainModule.Types | Where-Object Name -EQ 'ZNetPeer'
+        $saveWorld = $znet.Methods | Where-Object { $_.Name -eq 'SaveWorld' -and $_.Parameters.Count -eq 1 }
+        $hitRpcNames = @($character.Methods | Where-Object HasBody | ForEach-Object { $_.Body.Instructions } |
+            Where-Object { $_.OpCode.Code -eq [Mono.Cecil.Cil.Code]::Ldstr } | ForEach-Object { $_.Operand })
+        $pvpProbeShape = $null -ne $zdoPeer -and $null -ne $peerZdoInfo -and
+            'm_zdos' -in $zdoPeer.Fields.Name -and 'm_dataRevision' -in $peerZdoInfo.Fields.Name -and
+            $null -ne $zdoData -and $null -ne $routeRpc -and $null -ne $routedData -and
+            'm_methodHash' -in $routedData.Fields.Name -and 'm_targetPeerID' -in $routedData.Fields.Name -and
+            $null -ne $saveWorld -and 'm_onlineBackend' -in $znet.Fields.Name -and
+            'm_characterID' -in $znetPeer.Fields.Name -and
+            'RPC_Damage' -in $hitRpcNames -and 'RPC_Stagger' -in $hitRpcNames
+
         if ($null -eq $sendZdos) {
             $failures.Add("${resolvedInstall}: ZDOMan.SendZDOs missing")
         } elseif ($null -eq $sendToPeers -or $sendToPeers.Parameters.Count -ne 1 -or $sendToPeers.Parameters[0].ParameterType.FullName -ne 'System.Single') {
@@ -109,9 +129,12 @@ foreach ($install in $ValheimInstalls) {
         if ($null -eq $character -or $missingCharacterMethods.Count -gt 0 -or -not $playerTelemetryShape) {
             $failures.Add("${resolvedInstall}: FPS/ownership telemetry game shape changed")
         }
+        if (-not $pvpProbeShape) {
+            $failures.Add("${resolvedInstall}: PvP probe game shape changed (ZDO relay, hit routing, world save or backend)")
+        }
 
         if ($failures.Count -eq 0 -or -not ($failures[-1] -like "$resolvedInstall*")) {
-            Write-Host "Verified: $resolvedInstall (scheduler, ZDO guards 2/2, Steam and telemetry APIs present)"
+            Write-Host "Verified: $resolvedInstall (scheduler, ZDO guards 2/2, Steam, telemetry and PvP probe APIs present)"
         }
     } finally {
         $assembly.Dispose()

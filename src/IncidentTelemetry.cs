@@ -28,7 +28,9 @@ namespace AdaptiveNet
             RuntimeHealthSample serverHealth,
             int activeNonPlayerCharacters,
             int unownedNonPlayerCharacters,
-            int serverOwnedNonPlayerCharacters)
+            int serverOwnedNonPlayerCharacters,
+            PvpPeerStats pvp = default,
+            double serverWorldSaveMilliseconds = 0d)
         {
             UtcTicks = utcTicks;
             SessionSeconds = sessionSeconds;
@@ -44,6 +46,8 @@ namespace AdaptiveNet
             ActiveNonPlayerCharacters = Math.Max(0, activeNonPlayerCharacters);
             UnownedNonPlayerCharacters = Math.Max(0, unownedNonPlayerCharacters);
             ServerOwnedNonPlayerCharacters = Math.Max(0, serverOwnedNonPlayerCharacters);
+            Pvp = pvp;
+            ServerWorldSaveMilliseconds = Math.Max(0d, serverWorldSaveMilliseconds);
         }
 
         public long UtcTicks { get; }
@@ -60,6 +64,8 @@ namespace AdaptiveNet
         public int ActiveNonPlayerCharacters { get; }
         public int UnownedNonPlayerCharacters { get; }
         public int ServerOwnedNonPlayerCharacters { get; }
+        public PvpPeerStats Pvp { get; }
+        public double ServerWorldSaveMilliseconds { get; }
     }
 
     internal sealed class IncidentTelemetry : IDisposable
@@ -81,7 +87,12 @@ namespace AdaptiveNet
             "client_gc2,client_gc_correlated_frame_ms,client_managed_memory_bytes,server_frame_avg_ms," +
             "server_frame_p95_ms,server_frame_max_ms,server_stall_frames,server_severe_stall_frames," +
             "server_gc0,server_gc1,server_gc2,server_gc_correlated_frame_ms,server_managed_memory_bytes," +
-            "active_nonplayer_characters,unowned_nonplayer_characters,server_owned_nonplayer_characters";
+            "active_nonplayer_characters,unowned_nonplayer_characters,server_owned_nonplayer_characters," +
+            // PvP probes, appended so earlier column positions stay put.
+            "relay_hold_samples,relay_hold_avg_ms,relay_hold_p95_ms,relay_hold_max_ms," +
+            "hit_forward_count,hit_forward_avg_ms,hit_forward_max_ms," +
+            "zdo_service_calls,zdo_service_gap_max_ms,zdo_queue_refusals," +
+            "client_hit_upload_count,client_hit_upload_avg_ms,client_hit_upload_max_ms,server_world_save_ms";
 
         internal static string HeaderForTesting => Header;
         internal static string FormatForTesting(
@@ -341,6 +352,8 @@ namespace AdaptiveNet
             NetworkSample upload = client.UploadNetwork;
             RuntimeHealthSample clientHealth = client.Health;
             RuntimeHealthSample serverHealth = point.ServerHealth;
+            PvpPeerStats pvp = point.Pvp;
+            LatencySummary hitUpload = client.HitUpload;
             return string.Join(",",
                 new DateTime(point.UtcTicks, DateTimeKind.Utc).ToString("O", CultureInfo.InvariantCulture),
                 F(point.SessionSeconds),
@@ -409,7 +422,17 @@ namespace AdaptiveNet
                 serverHealth.ManagedMemoryBytes.ToString(CultureInfo.InvariantCulture),
                 point.ActiveNonPlayerCharacters.ToString(CultureInfo.InvariantCulture),
                 point.UnownedNonPlayerCharacters.ToString(CultureInfo.InvariantCulture),
-                point.ServerOwnedNonPlayerCharacters.ToString(CultureInfo.InvariantCulture));
+                point.ServerOwnedNonPlayerCharacters.ToString(CultureInfo.InvariantCulture),
+                pvp.RelayHold.Count.ToString(CultureInfo.InvariantCulture),
+                F(pvp.RelayHold.AverageMilliseconds), F(pvp.RelayHold.P95Milliseconds), F(pvp.RelayHold.MaximumMilliseconds),
+                pvp.HitForward.Count.ToString(CultureInfo.InvariantCulture),
+                F(pvp.HitForward.AverageMilliseconds), F(pvp.HitForward.MaximumMilliseconds),
+                pvp.ServiceCalls.ToString(CultureInfo.InvariantCulture),
+                F(pvp.ServiceGapMaximumMilliseconds),
+                pvp.QueueRefusals.ToString(CultureInfo.InvariantCulture),
+                hitUpload.Count.ToString(CultureInfo.InvariantCulture),
+                F(hitUpload.AverageMilliseconds), F(hitUpload.MaximumMilliseconds),
+                F(point.ServerWorldSaveMilliseconds));
         }
 
         private static string F(double value) => value.ToString("F3", CultureInfo.InvariantCulture);
