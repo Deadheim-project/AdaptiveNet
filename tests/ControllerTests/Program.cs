@@ -237,6 +237,45 @@ AdaptiveControllerOptions StandardOptions()
 }
 
 {
+    // The 2026-10-03 login: a 28 s world-load frame, no player yet, and a report delay that grew
+    // from 0.5 s to 4.5 s only because the client's main thread was frozen.
+    var calm = new RuntimeHealthSample(1d, 60, 16d, 20d, 40d, 0, 0, 0, 0, 0, 0d, 1000L);
+    Test.Equal(string.Empty, DiagnosticAnomalyClassifier.ClassifyPeer(
+        false, "steady", true, true, false, false, 4500d, calm, 250d, 500d, 500d),
+        "report delay while the client is still loading is not an incident");
+    Test.Equal(string.Empty, DiagnosticAnomalyClassifier.ClassifyPeer(
+        false, "steady", true, true, true, true, 4500d, calm, 250d, 500d, 500d),
+        "report delay across a teleport is not an incident");
+    Test.Equal("telemetry-delayed", DiagnosticAnomalyClassifier.ClassifyPeer(
+        false, "steady", true, true, true, false, 4500d, calm, 250d, 500d, 500d),
+        "report delay of a client in the game still opens an incident");
+    Test.Equal(string.Empty, DiagnosticAnomalyClassifier.ClassifyPeer(
+        false, "steady", true, true, true, false, 120d, calm, 250d, 500d, 500d),
+        "report delay under the threshold is not an incident");
+    Test.Equal("network-queue-delay", DiagnosticAnomalyClassifier.ClassifyPeer(
+        true, "queue-delay", true, true, false, false, 4500d, calm, 250d, 500d, 500d),
+        "network congestion still counts while the client is loading");
+}
+
+{
+    const double Missing = 4d;
+    Test.True(!ClientReportPolicy.IsMissing(false, false, 100d, double.NaN, Missing),
+        "client still loading the world has no character and is not missing a report");
+    Test.True(!ClientReportPolicy.IsMissing(false, false, 100d, 99d, Missing),
+        "client is given the full window once its character exists");
+    Test.True(ClientReportPolicy.IsMissing(false, false, 104d, 100d, Missing),
+        "client in the game that never reported is missing at the threshold");
+    Test.True(ClientReportPolicy.IsMissing(false, false, 500d, 100d, Missing),
+        "client without the mod stays missing");
+    Test.True(!ClientReportPolicy.IsMissing(false, true, 500d, 100d, Missing),
+        "client reporting now is not missing");
+    Test.True(!ClientReportPolicy.IsMissing(true, false, 500d, 100d, Missing),
+        "client that reported and went silent is a delay or stall, not a missing report");
+    Test.True(!ClientReportPolicy.IsMissing(true, false, 500d, double.NaN, Missing),
+        "reported client without a character is not missing");
+}
+
+{
     var gcHealth = new RuntimeHealthSample(
         1d, 60, 16d, 20d, 310d, 1, 0, 1, 0, 0, 310d, 1000L);
     string gc = DiagnosticAnomalyClassifier.ClassifyPeer(

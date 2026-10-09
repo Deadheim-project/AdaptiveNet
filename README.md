@@ -96,10 +96,10 @@ Alguns rótulos importantes na coluna `trigger`:
 | `network-quality` | A qualidade Steam daquela rota caiu. |
 | `network-queue-delay` | A fila de transporte envelheceu. |
 | `network-ping-inflation` | O ping subiu enquanto havia demanda. |
-| `telemetry-delayed` | O pequeno relatório do cliente ficou preso na fila ordenada; é evidência de atraso de entrega. |
+| `telemetry-delayed` | O pequeno relatório do cliente ficou preso na fila ordenada; é evidência de atraso de entrega. Não conta enquanto o jogador ainda carrega o mundo ou está teleportando: nesses momentos o cliente fica sem produzir frames e o atraso estimado cresce sem que a rede tenha falhado. |
 | `client-frame-stall` / `server-frame-stall` | O processo ficou sem produzir frame por tempo excessivo. |
 | `client-gc-correlated-stall` / `server-gc-correlated-stall` | Houve coleta de GC no mesmo frame travado; é correlação, não prova isolada de causalidade. |
-| `client-report-missing` | O cliente conectado não entregou nenhum relatório compatível no prazo. |
+| `client-report-missing` | O cliente nunca entregou um relatório compatível, mesmo depois de `ClientReportMissingSeconds` com o personagem já no jogo (cliente sem o mod ou com versão incompatível). A contagem começa quando o personagem existe, não na conexão: o carregamento do mundo leva dezenas de segundos e, antes da 0.5.1, abria um incidente a cada login. Um cliente que reportava e ficou em silêncio (teleporte, travada) não entra aqui; isso é `telemetry-delayed` ou `client-frame-stall`. |
 | `server-world-save` | O save do mundo prendeu a thread principal do servidor por mais que `FrameStallThresholdMs`; todos os jogadores congelaram juntos. A duração está em `server_world_save_ms`. |
 
 Os campos `server_*` mostram a visão do servidor para aquele jogador. Os campos `client_*` vêm do cliente e mostram a direção de upload dele. Comparar os dois permite separar rota ruim, fila cliente→servidor, travada do cliente e travada global do servidor. `owned_nonplayer_characters` conta somente personagens/mobs ativos atribuídos ao jogador; esta versão não transfere ownership.
@@ -119,7 +119,7 @@ No Valheim, o atacante acerta onde ele vê a vítima, e o bloqueio/parry é deci
 | Recusas da fila (`zdoRefused`) | Tentativas de envio de ZDO que a guarda de fila recusou porque a conexão já estava cheia. | log, CSVs (`zdo_queue_refusals`) |
 | Save do mundo (`worldSave`) | Tempo em que `ZNet.SaveWorld` prendeu a thread principal. Também vai para o log a cada save. | log, CSVs, rótulo `server-world-save` |
 
-As medidas vêm do caminho de envio do próprio Valheim. Por isso funcionam igual com o escalonador ligado ou com `Mode = ObserveOnly`, o que permite comparar os dois com os mesmos jogadores. Elas só observam: nada muda no que o jogo envia, e uma falha desliga as medidas com um aviso, sem afetar a rede. O relatório cliente→servidor passou ao protocolo 2; servidor e launcher precisam estar na 0.5.0 juntos.
+As medidas vêm do caminho de envio do próprio Valheim. Por isso funcionam igual com o escalonador ligado ou com `Mode = ObserveOnly`, o que permite comparar os dois com os mesmos jogadores. Elas só observam: nada muda no que o jogo envia, e uma falha desliga as medidas com um aviso, sem afetar a rede. O relatório cliente→servidor passou ao protocolo 2 na 0.5.0; servidor e launcher precisam estar sempre na mesma versão (0.5.1 ou posterior).
 
 Na linha periódica do log, `n` e `max` cobrem todo o intervalo do log; o `p95` é o pior p95 de um segundo dentro dele.
 

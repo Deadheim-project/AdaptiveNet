@@ -156,7 +156,7 @@ namespace AdaptiveNet
                 ClientReportDelayThresholdMs = Synced(config.Bind("Diagnostics", "ClientReportDelayThresholdMs", 500f,
                     new ConfigDescription("Estimated extra delay of client diagnostic reports that triggers an incident.", new AcceptableValueRange<float>(100f, 10000f)))),
                 ClientReportMissingSeconds = Synced(config.Bind("Diagnostics", "ClientReportMissingSeconds", 4f,
-                    new ConfigDescription("Connected time without a client report before telemetry is marked missing.", new AcceptableValueRange<float>(2f, 30f)))),
+                    new ConfigDescription("In-game time (counted from when the player's character exists) without any client report before telemetry is marked missing.", new AcceptableValueRange<float>(2f, 30f)))),
                 OwnershipSampleIntervalSeconds = Synced(config.Bind("Diagnostics", "OwnershipSampleIntervalSeconds", 5f,
                     new ConfigDescription("Interval for counting active character/mob ownership.", new AcceptableValueRange<float>(1f, 30f)))),
                 IncidentFileMaxMiB = Synced(config.Bind("Diagnostics", "IncidentFileMaxMiB", 16,

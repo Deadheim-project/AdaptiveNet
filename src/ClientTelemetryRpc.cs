@@ -201,8 +201,10 @@ namespace AdaptiveNet
             double reportAgeSeconds,
             RuntimeHealthSample health,
             NetworkSample uploadNetwork,
-            LatencySummary hitUpload = default)
+            LatencySummary hitUpload = default,
+            bool everReported = false)
         {
+            EverReported = everReported || available;
             Available = available;
             Fresh = fresh;
             ReportsMerged = Math.Max(0, reportsMerged);
@@ -218,6 +220,8 @@ namespace AdaptiveNet
         }
 
         public bool Available { get; }
+        /// <summary>Whether any report has ever arrived on this connection, live now or not.</summary>
+        public bool EverReported { get; }
         public bool Fresh { get; }
         public int ReportsMerged { get; }
         public long Sequence { get; }
@@ -304,7 +308,8 @@ namespace AdaptiveNet
                 silenceSeconds,
                 _mergedHealth,
                 _latestNetwork,
-                _mergedHitUpload);
+                _mergedHitUpload,
+                _available);
             _mergedHealth = default;
             _mergedHitUpload = default;
             _reportsMerged = 0;

@@ -51,6 +51,9 @@ namespace AdaptiveNet
         public double LastAnomalyTime { get; set; } = double.NegativeInfinity;
         public bool ClientReportMissingLatched { get; set; }
         public bool TransportSampleMissingLatched { get; set; }
+        // When this player's character first existed on the server; NaN while the client is still
+        // loading the world. client-report-missing counts from here, not from the connection.
+        public double CharacterSince { get; set; } = double.NaN;
     }
 
     internal sealed class DiagnosticsSnapshot
@@ -444,6 +447,10 @@ namespace AdaptiveNet
                     ConnectionContext context = GetOrCreate(socket, unscaledTime);
                     context.PlayerName = SanitizePlayerName(peer.m_playerName);
                     context.PeerUid = peer.m_uid;
+                    if (isServer && double.IsNaN(context.CharacterSince) && !peer.m_characterID.IsNone())
+                    {
+                        context.CharacterSince = unscaledTime;
+                    }
                     bool transportSampleAvailable = TrySample(transport, out NetworkSample sample);
                     context.LastSample = sample;
                     if (transportSampleAvailable)
@@ -706,7 +713,8 @@ namespace AdaptiveNet
                 Math.Max(_settings.FrameStallThresholdMs.Value, _settings.SevereFrameStallThresholdMs.Value),
                 _settings.ClientReportDelayThresholdMs.Value);
 
-            if (!client.Available && now - context.ConnectedAt >= EffectiveClientReportMissingSeconds())
+            if (ClientReportPolicy.IsMissing(
+                    client.EverReported, client.Available, now, context.CharacterSince, EffectiveClientReportMissingSeconds()))
             {
                 if (!context.ClientReportMissingLatched)
                 {
@@ -1126,8 +1134,12 @@ namespace AdaptiveNet
             if (isServer)
             {
                 snapshot.ClientTelemetryPeers = contexts.Count(item => item.LastClientSnapshot.Available);
-                snapshot.MissingClientReports = contexts.Count(item =>
-                    !item.LastClientSnapshot.Available && now - item.ConnectedAt >= EffectiveClientReportMissingSeconds());
+                snapshot.MissingClientReports = contexts.Count(item => ClientReportPolicy.IsMissing(
+                    item.LastClientSnapshot.EverReported,
+                    item.LastClientSnapshot.Available,
+                    now,
+                    item.CharacterSince,
+                    EffectiveClientReportMissingSeconds()));
                 snapshot.MaximumClientFrameMs = contexts.Max(item => item.LastClientSnapshot.Health.MaximumFrameMilliseconds);
                 snapshot.MaximumClientReportDelayMs = contexts.Max(item => item.LastClientSnapshot.DeliveryDelayMilliseconds);
                 snapshot.MaximumClientHitUploadMs = contexts.Max(item => item.LastClientSnapshot.HitUpload.MaximumMilliseconds);

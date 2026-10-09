@@ -184,6 +184,35 @@ namespace AdaptiveNet.Core
         private static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
     }
 
+    internal static class ClientReportPolicy
+    {
+        /// <summary>
+        /// Whether a connected client counts as having failed to deliver its diagnostic report.
+        /// </summary>
+        /// <remarks>
+        /// A client that is still loading the world cannot report: its first report arrived 14 s
+        /// after it connected in the 2026-10-03 test, and it had no character for 33 s. Counting
+        /// from the connection therefore opened an incident on every login. This counts from the
+        /// moment the player's character exists, and only for a client that has never reported:
+        /// one that reported and then went silent (a teleport, a hang) is the delivery-delay and
+        /// frame-stall triggers' business, not a client without the mod.
+        /// </remarks>
+        /// <param name="everReported">Whether any report has arrived on this connection.</param>
+        /// <param name="reportAvailable">Whether a report arrived recently enough to count as live.</param>
+        /// <param name="characterSince">When the character first existed; NaN while it has none.</param>
+        public static bool IsMissing(
+            bool everReported,
+            bool reportAvailable,
+            double now,
+            double characterSince,
+            double missingAfterSeconds)
+        {
+            if (everReported || reportAvailable) return false;
+            if (double.IsNaN(characterSince)) return false;
+            return now - characterSince >= missingAfterSeconds;
+        }
+    }
+
     internal static class DiagnosticAnomalyClassifier
     {
         public static string ClassifyPeer(
@@ -206,11 +235,16 @@ namespace AdaptiveNet.Core
             }
             if (!clientReportAvailable) return result;
 
-            if (clientDeliveryDelayMilliseconds >= deliveryDelayThresholdMilliseconds)
+            // A client still loading the world, or crossing a teleport, cannot report on time: its
+            // main thread is blocked, so the report's estimated delay grows with the freeze
+            // (0.5 s to 4.5 s across a 28 s world load, seen 2026-10-03) while the link is fine.
+            // Only a client that is in the game can have a late report mean a delivery delay.
+            bool inGame = clientPlayerReady && !clientTeleporting;
+            if (inGame && clientDeliveryDelayMilliseconds >= deliveryDelayThresholdMilliseconds)
             {
                 Append(ref result, "telemetry-delayed");
             }
-            if (!clientFocused || !clientPlayerReady || clientTeleporting)
+            if (!clientFocused || !inGame)
             {
                 return result;
             }

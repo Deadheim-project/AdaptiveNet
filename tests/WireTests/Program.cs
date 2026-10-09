@@ -99,6 +99,13 @@ Assert.Near(600d, normalCadence.TakeSnapshot(225.6d, 1d).DeliveryDelayMillisecon
     "silence beyond the expected report cadence becomes delivery-delay evidence");
 Assert.True(!normalCadence.TakeSnapshot(228d, 1d, 4d).Available,
     "client report stream becomes unavailable after the missing threshold");
+Assert.True(normalCadence.TakeSnapshot(228d, 1d, 4d).EverReported,
+    "a client that went silent is still remembered as having reported");
+
+var neverReported = new RemoteClientTelemetryState();
+RemoteClientTelemetrySnapshot silentFromTheStart = neverReported.TakeSnapshot(500d, 1d, 4d);
+Assert.True(!silentFromTheStart.Available && !silentFromTheStart.EverReported,
+    "a client that has sent nothing is neither available nor remembered as reporting");
 
 var slowerCadence = new RemoteClientTelemetryState();
 Assert.True(slowerCadence.Accept(source, 223.5d), "slower cadence baseline accepted");
