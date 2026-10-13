@@ -96,7 +96,7 @@ Alguns rótulos importantes na coluna `trigger`:
 | `network-quality` | A qualidade Steam daquela rota caiu. |
 | `network-queue-delay` | A fila de transporte envelheceu. |
 | `network-ping-inflation` | O ping subiu enquanto havia demanda. |
-| `telemetry-delayed` | O pequeno relatório do cliente ficou preso na fila ordenada; é evidência de atraso de entrega. Não conta enquanto o jogador ainda carrega o mundo ou está teleportando: nesses momentos o cliente fica sem produzir frames e o atraso estimado cresce sem que a rede tenha falhado. |
+| `telemetry-delayed` | O pequeno relatório do cliente ficou preso na fila ordenada; é evidência de atraso de entrega. Não conta enquanto o jogador ainda carrega o mundo, está teleportando ou está com a janela fora de foco (alt-tab): nesses momentos o cliente fica sem produzir frames, ou produz poucos, e o atraso estimado cresce sem que a rede tenha falhado. Antes da 0.5.2, cada alt-tab podia abrir um incidente. |
 | `client-frame-stall` / `server-frame-stall` | O processo ficou sem produzir frame por tempo excessivo. |
 | `client-gc-correlated-stall` / `server-gc-correlated-stall` | Houve coleta de GC no mesmo frame travado; é correlação, não prova isolada de causalidade. |
 | `client-report-missing` | O cliente nunca entregou um relatório compatível, mesmo depois de `ClientReportMissingSeconds` com o personagem já no jogo (cliente sem o mod ou com versão incompatível). A contagem começa quando o personagem existe, não na conexão: o carregamento do mundo leva dezenas de segundos e, antes da 0.5.1, abria um incidente a cada login. Um cliente que reportava e ficou em silêncio (teleporte, travada) não entra aqui; isso é `telemetry-delayed` ou `client-frame-stall`. |

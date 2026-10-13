@@ -239,8 +239,10 @@ namespace AdaptiveNet.Core
             // main thread is blocked, so the report's estimated delay grows with the freeze
             // (0.5 s to 4.5 s across a 28 s world load, seen 2026-10-03) while the link is fine.
             // Only a client that is in the game can have a late report mean a delivery delay.
+            // An unfocused window is throttled the same way: on 2026-10-13, 10 of 11 automatic
+            // incidents were a background client at 1-3 FPS, with a 12 ms ping throughout.
             bool inGame = clientPlayerReady && !clientTeleporting;
-            if (inGame && clientDeliveryDelayMilliseconds >= deliveryDelayThresholdMilliseconds)
+            if (inGame && clientFocused && clientDeliveryDelayMilliseconds >= deliveryDelayThresholdMilliseconds)
             {
                 Append(ref result, "telemetry-delayed");
             }

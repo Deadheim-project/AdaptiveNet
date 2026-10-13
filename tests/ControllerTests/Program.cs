@@ -249,6 +249,14 @@ AdaptiveControllerOptions StandardOptions()
     Test.Equal("telemetry-delayed", DiagnosticAnomalyClassifier.ClassifyPeer(
         false, "steady", true, true, true, false, 4500d, calm, 250d, 500d, 500d),
         "report delay of a client in the game still opens an incident");
+    // The 2026-10-13 two-client test: the background window ran at 1-3 FPS and its reports
+    // arrived 0.5-1.1 s late while the link stayed at 12 ms.
+    Test.Equal(string.Empty, DiagnosticAnomalyClassifier.ClassifyPeer(
+        false, "steady", true, false, true, false, 1084d, calm, 250d, 500d, 500d),
+        "report delay of an unfocused client is not an incident");
+    Test.Equal("network-queue-delay", DiagnosticAnomalyClassifier.ClassifyPeer(
+        true, "queue-delay", true, false, true, false, 1084d, calm, 250d, 500d, 500d),
+        "network congestion still counts while the client is unfocused");
     Test.Equal(string.Empty, DiagnosticAnomalyClassifier.ClassifyPeer(
         false, "steady", true, true, true, false, 120d, calm, 250d, 500d, 500d),
         "report delay under the threshold is not an incident");
