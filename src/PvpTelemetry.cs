@@ -77,6 +77,9 @@ namespace AdaptiveNet
 
         // Valheim's ZDO send guard refuses a send when less than this much room is left.
         private const int MinimumZdoPackageBytes = 2048;
+        // A hold this long is several scheduler rounds even with a full server; worth explaining.
+        private const double LongHoldMilliseconds = 2000d;
+        private const double LongHoldReportIntervalSeconds = 10d;
 
         private static readonly int[] HitRpcHashes =
         {
@@ -103,6 +106,8 @@ namespace AdaptiveNet
         private static long _worldSaveStartedAt;
         private static double _worldSaveMaximumMilliseconds;
         private static int _worldSaves;
+        private static double _lastLongHoldReport = double.NaN;
+        private static int _suppressedLongHolds;
 
         public static void Initialize(ManualLogSource log)
         {
@@ -267,15 +272,34 @@ namespace AdaptiveNet
                     ZDO zdo = ZDOMan.instance.GetZDO(character);
                     if (zdo == null) continue;
 
-                    bool inRange = (zdo.GetPosition() - origin).sqrMagnitude <= _radiusSquared;
+                    Vector3 position = zdo.GetPosition();
+                    bool inRange = (position - origin).sqrMagnitude <= _radiusSquared;
                     RelayHoldTracker<ZDOID, long>.Link link = Relay.GetLink(receiver.m_uid, character);
                     uint revision = 0;
-                    bool revisionKnown = Relay.IsBehind(link, character) &&
-                                         GameAccess.TryGetPeerZdoRevision(zdoPeer, character, out revision);
+                    bool revisionKnown = false;
+                    if (Relay.IsBehind(link, character))
+                    {
+                        revisionKnown = GameAccess.TryGetPeerZdoRevision(zdoPeer, character, out revision);
+                        if (!revisionKnown)
+                        {
+                            // No copy at all: Valheim stopped sending this source to the receiver.
+                            Relay.ObserveMissingCopy(link);
+                            continue;
+                        }
+                    }
+
+                    bool hadRevision = link.HasRevision;
+                    uint previous = link.Revision;
+                    double previousSince = link.RevisionSince;
                     if (Relay.ObserveService(link, character, inRange, revisionKnown, revision, now, out double hold))
                     {
                         window.RelayHold.Add(hold);
                         RelayHoldAll.Add(hold);
+                        if (hold >= LongHoldMilliseconds)
+                        {
+                            ReportLongHold(receiver, source, character, position, origin, hadRevision, previous,
+                                previousSince, revision, hold, now);
+                        }
                     }
                 }
             }
@@ -365,6 +389,51 @@ namespace AdaptiveNet
 
         private static double Now() => Time.realtimeSinceStartupAsDouble;
 
+        /// <summary>
+        /// Logs what lies behind a hold of several seconds: a real stall in sending, or a source the
+        /// receiver could not see. Rate-limited, since one stuck pair can repeat for a while.
+        /// </summary>
+        private static void ReportLongHold(
+            ZNetPeer receiver,
+            ZNetPeer source,
+            ZDOID character,
+            Vector3 position,
+            Vector3 origin,
+            bool hadRevision,
+            uint previous,
+            double previousSince,
+            uint revision,
+            double hold,
+            double now)
+        {
+            if (_log == null) return;
+            if (!double.IsNaN(_lastLongHoldReport) && now - _lastLongHoldReport < LongHoldReportIntervalSeconds)
+            {
+                _suppressedLongHolds++;
+                return;
+            }
+            _lastLongHoldReport = now;
+            int suppressed = _suppressedLongHolds;
+            _suppressedLongHolds = 0;
+
+            Vector3 flat = position - origin;
+            flat.y = 0f;
+            string activeArea = ZNet.instance != null && ZoneSystem.instance != null
+                ? (ZNetScene.InActiveArea(position, origin) ? "yes" : "no")
+                : "n/a";
+            SimulationDistance simulation = receiver.m_simulationDistance;
+            int kept = Relay.GetHistory(character, out double oldestArrival);
+            string sinceCopy = hadRevision && !double.IsNaN(previousSince) ? $"{now - previousSince:F1}s" : "n/a";
+            string history = kept > 0 ? $"{kept} arrivals over {now - oldestArrival:F1}s" : "empty";
+            _log.LogWarning(
+                $"relay hold {hold:F0} ms: receiver={receiver.m_playerName}, source={source.m_playerName}, " +
+                $"distance={(position - origin).magnitude:F0}m (flat {flat.magnitude:F0}m), activeArea={activeArea}, " +
+                $"simNear={simulation.NearSimulationDistance}{(simulation.IsClassic ? " classic" : string.Empty)}, " +
+                $"revision={(hadRevision ? previous.ToString() : "none")}->{revision}, lastCopy={sinceCopy} ago, " +
+                $"history={history}" +
+                (suppressed > 0 ? $", {suppressed} more since the last report" : string.Empty));
+        }
+
         private static void Fault(string stage, Exception exception)
         {
             _faulted = true;
@@ -386,6 +455,8 @@ namespace AdaptiveNet
             HitForwardAll.Reset();
             ClientHitUpload.Reset();
             _isServer = false;
+            _lastLongHoldReport = double.NaN;
+            _suppressedLongHolds = 0;
             _worldSaveStartedAt = 0L;
             _worldSaveMaximumMilliseconds = 0d;
             _worldSaves = 0;

@@ -164,6 +164,8 @@ namespace AdaptiveNet.Core
             internal uint Revision;
             internal bool HasRevision;
             internal double InRangeSince = double.NaN;
+            /// <summary>When <see cref="Revision"/> was last recorded as sent; NaN before the first copy.</summary>
+            internal double RevisionSince = double.NaN;
         }
 
         private sealed class SourceHistory
@@ -259,6 +261,7 @@ namespace AdaptiveNet.Core
             uint previous = link.Revision;
             link.Revision = revision;
             link.HasRevision = true;
+            link.RevisionSince = now;
             if (!hadRevision || !inRange || !wasInRange || revision < previous) return false;
             if (!_sources.TryGetValue(source, out SourceHistory history) || history.Count == 0) return false;
 
@@ -276,6 +279,30 @@ namespace AdaptiveNet.Core
 
             holdMilliseconds = Math.Max(0d, (now - Math.Max(firstNewerArrival, link.InRangeSince)) * 1000d);
             return true;
+        }
+
+        /// <summary>
+        /// The receiver holds no copy of the source at all. Valheim drops its copy when the source
+        /// moves to a sector outside the receiver's active area (ZDOPeer.ZDOSectorInvalidated),
+        /// which can be well inside the PvP radius, and stops sending it. The source is out of
+        /// sight for the receiver until the next copy, so that copy is a visibility change and
+        /// must not be measured as a hold of however long it was gone.
+        /// </summary>
+        public void ObserveMissingCopy(Link link)
+        {
+            link.HasRevision = false;
+            link.InRangeSince = double.NaN;
+            link.RevisionSince = double.NaN;
+        }
+
+        /// <summary>How many arrivals of the source are kept and when the oldest of them came in.</summary>
+        public int GetHistory(TSource source, out double oldestArrival)
+        {
+            oldestArrival = double.NaN;
+            if (!_sources.TryGetValue(source, out SourceHistory history) || history.Count == 0) return 0;
+            int oldest = (history.Next - history.Count + RevisionHistory) % RevisionHistory;
+            oldestArrival = history.Times[oldest];
+            return history.Count;
         }
 
         /// <summary>Forgets sources and receivers that are no longer connected.</summary>

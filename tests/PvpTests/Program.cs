@@ -123,6 +123,34 @@ using AdaptiveNet.Core;
 }
 
 {
+    // Inside the PvP radius but outside the receiver's active area: Valheim drops the receiver's
+    // copy and stops sending the source until it comes back (seen live as 16-54 s "holds").
+    var tracker = new RelayHoldTracker<string, long>();
+    RelayHoldTracker<string, long>.Link link = tracker.GetLink(2L, "A");
+    tracker.ObserveArrival("A", 1u, 0d);
+    tracker.ObserveService(link, "A", true, true, 1u, 0.1d, out _);
+    tracker.ObserveArrival("A", 2u, 0.2d);
+    tracker.ObserveService(link, "A", true, true, 2u, 0.3d, out _);
+
+    tracker.ObserveArrival("A", 3u, 1d);
+    tracker.ObserveMissingCopy(link);
+    Test.True(tracker.IsBehind(link, "A"), "a receiver without a copy is behind");
+    for (int index = 4; index < 40; index++) tracker.ObserveArrival("A", (uint)index, index * 0.5d);
+    tracker.ObserveMissingCopy(link);
+    Test.True(!tracker.ObserveService(link, "A", true, true, 39u, 21d, out _),
+        "the copy after the receiver had none is a visibility change, not a 20 s hold");
+    Test.Near(21d, link.RevisionSince, 0.001d, "the link records when it was last sent a copy");
+    tracker.ObserveArrival("A", 40u, 21.05d);
+    Test.True(tracker.ObserveService(link, "A", true, true, 40u, 21.30d, out double hold),
+        "once followed again, updates are sampled");
+    Test.Near(250d, hold, 0.001d, "the hold after reappearing starts at the newer arrival");
+
+    Test.Equal(40, tracker.GetHistory("A", out double oldest), "history keeps every arrival under its size");
+    Test.Near(0d, oldest, 0.001d, "the oldest kept arrival");
+    Test.Equal(0, tracker.GetHistory("B", out _), "an unknown source has no history");
+}
+
+{
     var tracker = new RelayHoldTracker<string, long>();
     RelayHoldTracker<string, long>.Link link = tracker.GetLink(2L, "A");
     tracker.ObserveArrival("A", 100u, 0d);
