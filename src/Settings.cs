@@ -131,10 +131,12 @@ namespace AdaptiveNet
                     new ConfigDescription("Hard cap on peer send attempts in one frame.", new AcceptableValueRange<int>(1, 64)))),
                 SchedulerCpuBudgetMs = Synced(config.Bind("Scheduler", "CpuBudgetMs", 0.75f,
                     new ConfigDescription("Main-thread time budget for peer send attempts per frame.", new AcceptableValueRange<float>(0.1f, 20f)))),
-                OverlayKey = config.Bind("Diagnostics", "OverlayKey", KeyCode.F8,
-                    "Toggle the lightweight in-game diagnostics overlay."),
-                IncidentMarkerKey = config.Bind("Diagnostics", "IncidentMarkerKey", KeyCode.F9,
-                    "Client key that asks the server to preserve the current diagnostic history."),
+                // 0.5.4: no key by default; Deadheim opens both from ESC > Deadheim > Admin. Renamed
+                // (OverlayKey = F8, IncidentMarkerKey = F9) so the keys already in an existing cfg do not come back.
+                OverlayKey = config.Bind("Diagnostics", "OverlayShortcut", KeyCode.None,
+                    "Toggle the lightweight in-game diagnostics overlay. None = no key (Deadheim: ESC > Deadheim > Admin > Painel de rede)."),
+                IncidentMarkerKey = config.Bind("Diagnostics", "IncidentMarkerShortcut", KeyCode.None,
+                    "Client key that asks the server to preserve the current diagnostic history. None = no key (Deadheim: ESC > Deadheim > Admin > Marcar incidente de rede)."),
                 LogIntervalSeconds = config.Bind("Diagnostics", "LogIntervalSeconds", 15f,
                     new ConfigDescription("Aggregate telemetry log interval; zero disables periodic lines.", new AcceptableValueRange<float>(0f, 300f))),
                 CsvTelemetry = config.Bind("Diagnostics", "CsvTelemetry", false,

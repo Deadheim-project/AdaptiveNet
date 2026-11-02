@@ -81,11 +81,11 @@ O jogo não é bloqueado para escrever o CSV: um thread em segundo plano possui 
 
 ### Marcação pelo jogador
 
-Quando perceber teleporte, ações atrasadas ou dano chegando tarde, o jogador deve pressionar **F9** assim que possível. Isso pede ao servidor para preservar o minuto anterior e continuar coletando por mais 15 segundos. Se já houver uma captura ativa, o marcador é anexado ao mesmo incidente. O servidor aceita um marcador por jogador a cada 30 segundos e ignora os demais, para que ninguém mantenha a caixa-preta ocupada segurando F9.
+Quando perceber teleporte, ações atrasadas ou dano chegando tarde, o jogador deve usar o marcador assim que possível: o atalho `Diagnostics.IncidentMarkerShortcut` (vazio por padrão desde a 0.5.4; era F9) ou, no Deadheim, ESC > Deadheim > Admin > Marcar incidente de rede. Isso pede ao servidor para preservar o minuto anterior e continuar coletando por mais 15 segundos. Se já houver uma captura ativa, o marcador é anexado ao mesmo incidente. O servidor aceita um marcador por jogador a cada 30 segundos e ignora os demais, para que ninguém mantenha a caixa-preta ocupada segurando a tecla.
 
-Em PvP, todo mundo que perde uma luta aperta F9. Por isso, além do limite por jogador, o servidor inicia **no máximo uma captura manual por minuto**. Um marcador acima desse limite ainda entra no `trigger` de qualquer captura que esteja aberta ou que comece naquele instante; sozinho, ele só aparece no log em nível debug.
+Em PvP, todo mundo que perde uma luta marcaria um incidente. Por isso, além do limite por jogador, o servidor inicia **no máximo uma captura manual por minuto**. Um marcador acima desse limite ainda entra no `trigger` de qualquer captura que esteja aberta ou que comece naquele instante; sozinho, ele só aparece no log em nível debug.
 
-F8 continua abrindo o overlay. Ele mostra FPS/frame local, quantidade de clientes reportando, maior atraso dos relatórios e o número do incidente ativo.
+O overlay abre pelo atalho `Diagnostics.OverlayShortcut` (vazio por padrão desde a 0.5.4; era F8) ou, no Deadheim, em ESC > Deadheim > Admin > Painel de rede. Ele mostra FPS/frame local, quantidade de clientes reportando, maior atraso dos relatórios e o número do incidente ativo.
 
 ### Como interpretar
 
@@ -114,7 +114,7 @@ No Valheim, o atacante acerta onde ele vê a vítima, e o bloqueio/parry é deci
 |---|---|---|
 | Retenção de posição (`relayHold`) | Quanto tempo uma posição nova de um jogador ficou no servidor até cada outro jogador **dentro de `GroupRadiusMeters`** recebê-la. É o atraso que a cadência do escalonador acrescenta. A primeira cópia depois de alguém entrar no raio não conta: é visibilidade, não atraso. O mesmo vale quando o Valheim tira o outro jogador da área ativa do receptor (a ~64-112 m, menos que o raio) e para de enviá-lo. Retenções acima de 2 s geram um aviso `relay hold ... ms` no log com distância, área ativa e revisões. | log (`relayHold(n/p95/max)`), CSV agregado, CSV de incidentes (`relay_hold_*`) |
 | Espera do golpe até a vítima (`hitWait`) | Estimativa de quanto um `RPC_Damage`, `RPC_Stagger` ou `RPC_HitWhileDodging` encaminhado **a um jogador** esperou na fila de envio Steam dele. Golpes em mobs ficam de fora. | log, CSV agregado, CSV de incidentes (`hit_forward_*`) |
-| Espera do golpe no atacante (`hitUpload`) | O mesmo, medido no cliente para os golpes em jogadores que ele envia ao servidor, e reportado no relatório cliente→servidor. | log (`hitUploadMax`), CSV de incidentes (`client_hit_upload_*`), overlay F8 do cliente |
+| Espera do golpe no atacante (`hitUpload`) | O mesmo, medido no cliente para os golpes em jogadores que ele envia ao servidor, e reportado no relatório cliente→servidor. | log (`hitUploadMax`), CSV de incidentes (`client_hit_upload_*`), overlay do cliente |
 | Intervalo de atendimento (`serviceGapMax`) | Maior tempo entre duas tentativas de envio de ZDO para um mesmo jogador, incluindo uma que ainda não aconteceu. | log, CSVs (`zdo_service_gap_max_ms`) |
 | Recusas da fila (`zdoRefused`) | Tentativas de envio de ZDO que a guarda de fila recusou porque a conexão já estava cheia. | log, CSVs (`zdo_queue_refusals`) |
 | Save do mundo (`worldSave`) | Tempo em que `ZNet.SaveWorld` prendeu a thread principal. Também vai para o log a cada save. | log, CSVs, rótulo `server-world-save` |
@@ -158,7 +158,7 @@ Atualizar o DLL não altera um `.cfg` que já existe: um servidor vindo da 0.4.0
 
 O `Detalhes.AdaptiveNet.cfg` do servidor é o que vale. Pelo ServerSync, cada cliente com o AdaptiveNet recebe os valores do servidor ao conectar e roda com eles, inclusive a cadência de upload e os limiares da caixa-preta, que precisam ser iguais nas duas pontas. Pelo jogo, só admin do servidor altera um valor sincronizado.
 
-Ficam locais, por serem de cada máquina: `Diagnostics.OverlayKey`, `Diagnostics.IncidentMarkerKey`, `Diagnostics.LogIntervalSeconds` e `Diagnostics.CsvTelemetry`.
+Ficam locais, por serem de cada máquina: `Diagnostics.OverlayShortcut`, `Diagnostics.IncidentMarkerShortcut`, `Diagnostics.LogIntervalSeconds` e `Diagnostics.CsvTelemetry`.
 
 Cliente vanilla, ou com uma versão anterior ao ServerSync, continua conectando e usa o próprio arquivo. Cliente com AdaptiveNet que já tem ServerSync precisa estar na mesma versão do servidor; por isso, atualize servidor e launcher juntos.
 
