@@ -759,4 +759,308 @@ namespace AdaptiveNet.Core
             return best;
         }
     }
+
+    internal enum VerdictConfidence
+    {
+        Low = 1,
+        Medium = 2,
+        High = 3
+    }
+
+    internal sealed class VerdictCause
+    {
+        public VerdictCause(string code, VerdictConfidence confidence, double score, string player, string sentence)
+        {
+            Code = code;
+            Confidence = confidence;
+            Score = score;
+            Player = player ?? string.Empty;
+            Sentence = sentence;
+        }
+
+        /// <summary>Stable English label, the same family as the trigger labels.</summary>
+        public string Code { get; }
+        public VerdictConfidence Confidence { get; }
+        /// <summary>How far past its threshold the signal was; breaks ties between equal confidences.</summary>
+        public double Score { get; }
+        /// <summary>The player the cause is about; empty for a server-wide cause.</summary>
+        public string Player { get; }
+        /// <summary>Plain Portuguese. A rule over correlated signals starts with "indício de".</summary>
+        public string Sentence { get; }
+    }
+
+    /// <summary>
+    /// "What probably went wrong" for one incident, from the history the server already holds.
+    /// A pure function of the per-second histories of every player and of the server, so it runs
+    /// in the test suites. Nothing here proves a cause: each rule reads a correlation, and its
+    /// sentence says so.
+    /// </summary>
+    internal static class IncidentVerdict
+    {
+        public const string NoCause = "sem causa identificada pelas regras (veja o CSV do incidente)";
+
+        public static List<VerdictCause> Evaluate(
+            IReadOnlyList<VerdictPeerInput> peers,
+            IReadOnlyList<VerdictServerSample> server,
+            VerdictOptions options)
+        {
+            peers = peers ?? new VerdictPeerInput[0];
+            server = server ?? new VerdictServerSample[0];
+            options = options ?? new VerdictOptions();
+            var causes = new List<VerdictCause>();
+
+            AddServerCauses(causes, peers, server, options);
+            AddChurnCause(causes, server, options);
+
+            // A player's own causes are about the players that raised the incident; with none (a
+            // server trigger, a manual marker) every connected player is looked at.
+            bool anyTriggered = false;
+            for (int index = 0; index < peers.Count; index++) anyTriggered |= peers[index].Triggered;
+            for (int index = 0; index < peers.Count; index++)
+            {
+                VerdictPeerInput peer = peers[index];
+                if (anyTriggered && !peer.Triggered) continue;
+                AddPeerCauses(causes, peer, options);
+            }
+
+            causes.Sort((left, right) =>
+            {
+                int byConfidence = ((int)right.Confidence).CompareTo((int)left.Confidence);
+                if (byConfidence != 0) return byConfidence;
+                int byScore = right.Score.CompareTo(left.Score);
+                return byScore != 0 ? byScore : string.CompareOrdinal(left.Code, right.Code);
+            });
+            return causes;
+        }
+
+        public static string Format(IReadOnlyList<VerdictCause> causes)
+        {
+            if (causes == null || causes.Count == 0) return NoCause;
+            var parts = new List<string>(causes.Count);
+            for (int index = 0; index < causes.Count; index++)
+            {
+                VerdictCause cause = causes[index];
+                parts.Add($"{cause.Code} [{ConfidenceLabel(cause.Confidence)}]: {cause.Sentence}");
+            }
+            return string.Join(" | ", parts);
+        }
+
+        public static string ConfidenceLabel(VerdictConfidence confidence)
+        {
+            switch (confidence)
+            {
+                case VerdictConfidence.High: return "alta";
+                case VerdictConfidence.Medium: return "media";
+                default: return "baixa";
+            }
+        }
+
+        private static void AddServerCauses(
+            List<VerdictCause> causes,
+            IReadOnlyList<VerdictPeerInput> peers,
+            IReadOnlyList<VerdictServerSample> server,
+            VerdictOptions options)
+        {
+            // Sustained load: the median of N seconds of frame averages, no spike needed.
+            var averages = new List<double>();
+            var averageKeys = new List<long>();
+            for (int index = 0; index < server.Count; index++)
+            {
+                if (!server[index].Health.Valid) continue;
+                averages.Add(server[index].Health.AverageFrameMilliseconds);
+                averageKeys.Add(PeerCorrelation.Key(server[index].Seconds));
+            }
+            int window = Math.Max(1, options.ServerOverloadSeconds);
+            double threshold = options.ServerOverloadThresholdMs;
+            double peakMedian = 0d;
+            int peakEnd = -1;
+            for (int end = window; end <= averages.Count; end++)
+            {
+                double median = ServerLoad.LastMedian(averages, end, window);
+                if (median >= threshold && median > peakMedian)
+                {
+                    peakMedian = median;
+                    peakEnd = end;
+                }
+            }
+            if (peakEnd > 0)
+            {
+                int affected = 0;
+                int total = 0;
+                bool correlated = false;
+                for (int index = peakEnd - window; index < peakEnd && !correlated; index++)
+                {
+                    PeerCorrelation.Count(peers, averageKeys[index], options, out int a, out int t);
+                    if (a > affected) { affected = a; total = t; }
+                    correlated = PeerCorrelation.IsCorrelated(a, t, options);
+                }
+                string sentence = $"indício de servidor lento: frame médio de {Num(peakMedian, 0)} ms (alvo ~{Num(options.ServerFrameTargetMs, 0)} ms) por {window} s" +
+                    (correlated
+                        ? $"; {affected} de {total} jogadores com sintomas ao mesmo tempo"
+                        : string.Empty);
+                causes.Add(new VerdictCause(
+                    "server-overloaded",
+                    correlated ? VerdictConfidence.High : VerdictConfidence.Medium,
+                    peakMedian / threshold,
+                    string.Empty,
+                    sentence));
+            }
+
+            // Stalls: the stall with the most players hurt in its own second, then the longest.
+            string bestKind = null;
+            double bestMagnitude = 0d;
+            int bestAffected = -1;
+            int bestTotal = 0;
+            bool bestCorrelated = false;
+            for (int index = 0; index < server.Count; index++)
+            {
+                VerdictServerSample sample = server[index];
+                string kind = null;
+                double magnitude = 0d;
+                if (sample.WorldSaveMilliseconds >= options.FrameStallThresholdMs)
+                {
+                    kind = "salvamento do mundo";
+                    magnitude = sample.WorldSaveMilliseconds;
+                }
+                else if (sample.Health.GcCorrelatedStallMilliseconds >= options.FrameStallThresholdMs)
+                {
+                    kind = "coleta de lixo (GC)";
+                    magnitude = sample.Health.GcCorrelatedStallMilliseconds;
+                }
+                else if (sample.Health.MaximumFrameMilliseconds >= options.SevereFrameStallThresholdMs)
+                {
+                    kind = "frame longo";
+                    magnitude = sample.Health.MaximumFrameMilliseconds;
+                }
+                if (kind == null) continue;
+
+                PeerCorrelation.Count(peers, PeerCorrelation.Key(sample.Seconds), options, out int affected, out int total);
+                bool correlated = PeerCorrelation.IsCorrelated(affected, total, options);
+                bool better = bestKind == null ||
+                              (correlated && !bestCorrelated) ||
+                              (correlated == bestCorrelated && (affected > bestAffected ||
+                                                               (affected == bestAffected && magnitude > bestMagnitude)));
+                if (!better) continue;
+                bestKind = kind;
+                bestMagnitude = magnitude;
+                bestAffected = affected;
+                bestTotal = total;
+                bestCorrelated = correlated;
+            }
+            if (bestKind != null)
+            {
+                string together = bestTotal > 0
+                    ? $"{bestAffected} de {bestTotal} jogadores com sintomas no mesmo segundo"
+                    : "nenhum jogador conectado para comparar";
+                string sentence = bestCorrelated
+                    ? $"indício de servidor travado: {bestKind} de {Num(bestMagnitude, 0)} ms e {together}"
+                    : $"o servidor travou {Num(bestMagnitude, 0)} ms ({bestKind}); {together}";
+                causes.Add(new VerdictCause(
+                    "server-stall",
+                    bestCorrelated ? VerdictConfidence.High : VerdictConfidence.Medium,
+                    bestMagnitude / Math.Max(1d, options.SevereFrameStallThresholdMs),
+                    string.Empty,
+                    sentence));
+            }
+        }
+
+        private static void AddChurnCause(List<VerdictCause> causes, IReadOnlyList<VerdictServerSample> server, VerdictOptions options)
+        {
+            var traffic = new List<double>(server.Count);
+            for (int index = 0; index < server.Count; index++) traffic.Add(server[index].ZdoTraffic);
+            ChurnResult peak = ZdoChurn.Peak(traffic, options);
+            if (!peak.Triggered) return;
+            causes.Add(new VerdictCause(
+                "zdo-churn",
+                peak.Ratio >= options.ChurnFactor * 2d ? VerdictConfidence.High : VerdictConfidence.Medium,
+                peak.Ratio / options.ChurnFactor,
+                string.Empty,
+                $"indício de carga de objetos: o servidor moveu {Num(peak.Current, 0)} ZDOs/s, {Num(peak.Ratio, 1)}x a mediana recente ({Num(peak.Median, 0)}/s)"));
+        }
+
+        private static void AddPeerCauses(List<VerdictCause> causes, VerdictPeerInput peer, VerdictOptions options)
+        {
+            IReadOnlyList<VerdictPeerSample> samples = peer.Samples;
+            if (samples.Count == 0) return;
+
+            SaturationResult saturation = LinkSaturation.Analyze(samples, options);
+            if (saturation.Saturated)
+            {
+                string sentence = saturation.ByRate
+                    ? $"indício de link saturado: o servidor enviou {Kib(saturation.PeakOutgoingBytesPerSecond)} KiB/s para {peer.Name}, quase o teto de {Kib(saturation.RateBytesPerSecond)} KiB/s da conexão, por {saturation.Seconds} s, com até {Kib(saturation.PeakPendingBytes)} KiB esperando para sair"
+                    : $"indício de link saturado: os bytes esperando para sair para {peer.Name} cresceram de {Kib(saturation.PendingFromBytes)} para {Kib(saturation.PeakPendingBytes)} KiB em {saturation.Seconds} s";
+                causes.Add(new VerdictCause(
+                    "link-saturated",
+                    saturation.ByRate ? VerdictConfidence.High : VerdictConfidence.Medium,
+                    saturation.ByRate
+                        ? saturation.PeakOutgoingBytesPerSecond / Math.Max(1d, saturation.RateBytesPerSecond)
+                        : saturation.PeakPendingBytes / (double)Math.Max(1, options.PendingGrowthBytes),
+                    peer.Name,
+                    sentence));
+            }
+
+            LinkQualityStats stats = LinkQuality.Compute(samples);
+            if (LinkQuality.IsBad(stats, options, out bool jitterHigh, out bool lossHigh))
+            {
+                var details = new List<string>();
+                if (lossHigh)
+                {
+                    details.Add($"qualidade mínima {Num(stats.MinimumQuality, 2)} (perda aprox. {Num(stats.ApproximateLoss * 100d, 0)}%)");
+                }
+                if (jitterHigh)
+                {
+                    details.Add($"ping variando em média {Num(stats.JitterMilliseconds, 0)} ms de um segundo para o outro");
+                }
+                bool strong = (jitterHigh && lossHigh) ||
+                              (lossHigh && stats.ApproximateLoss >= options.LossThreshold * 2d) ||
+                              (jitterHigh && stats.JitterMilliseconds >= options.JitterThresholdMs * 2d);
+                double score = Math.Max(
+                    lossHigh ? stats.ApproximateLoss / Math.Max(0.0001d, options.LossThreshold) : 0d,
+                    jitterHigh ? stats.JitterMilliseconds / Math.Max(1d, options.JitterThresholdMs) : 0d);
+                causes.Add(new VerdictCause(
+                    "bad-connection",
+                    strong ? VerdictConfidence.High : VerdictConfidence.Medium,
+                    score,
+                    peer.Name,
+                    $"indício de conexão ruim de {peer.Name}: {string.Join(" e ", details)}"));
+            }
+
+            int loadingSeconds = 0;
+            int teleportingSeconds = 0;
+            string lastContext = string.Empty;
+            for (int index = 0; index < samples.Count; index++)
+            {
+                string context = DiagnosticAnomalyClassifier.ClassifyPeerContext(
+                    samples[index].ClientAvailable, samples[index].ClientPlayerReady, samples[index].ClientTeleporting);
+                if (context == "client-loading") loadingSeconds++;
+                else if (context == "client-teleporting") teleportingSeconds++;
+                lastContext = context;
+            }
+            if (loadingSeconds > 0)
+            {
+                causes.Add(new VerdictCause(
+                    "client-loading",
+                    lastContext == "client-loading" ? VerdictConfidence.High : VerdictConfidence.Medium,
+                    loadingSeconds,
+                    peer.Name,
+                    $"indício de que {peer.Name} estava carregando o mundo: o cliente disse não estar pronto por {loadingSeconds} s, e nesse estado a máquina trava sem que a rede tenha culpa"));
+            }
+            if (teleportingSeconds > 0)
+            {
+                causes.Add(new VerdictCause(
+                    "client-teleporting",
+                    lastContext == "client-teleporting" ? VerdictConfidence.High : VerdictConfidence.Medium,
+                    teleportingSeconds,
+                    peer.Name,
+                    $"indício de que {peer.Name} estava teleportando: o cliente reportou teleporte por {teleportingSeconds} s, e a carga da nova zona trava o cliente sem culpa da rede"));
+            }
+        }
+
+        private static string Num(double value, int decimals)
+        {
+            return value.ToString("F" + decimals, System.Globalization.CultureInfo.InvariantCulture).Replace('.', ',');
+        }
+
+        private static string Kib(double bytes) => Num(bytes / 1024d, 0);
+    }
 }

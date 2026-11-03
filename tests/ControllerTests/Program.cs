@@ -580,6 +580,144 @@ static List<VerdictServerSample> ServerOf(int seconds, Func<int, VerdictServerSa
     Test.True(!ZdoChurn.Peak(belowFactor.GetRange(0, 60), options).Triggered, "serie estavel nao tem pico");
 }
 
+// ---- Veredito por causa (funcao pura) ----
+static VerdictCause? Find(IReadOnlyList<VerdictCause> causes, string code, string player = "")
+{
+    foreach (VerdictCause cause in causes)
+    {
+        if (cause.Code == code && (player.Length == 0 || cause.Player == player)) return cause;
+    }
+    return null;
+}
+
+{
+    var options = new VerdictOptions();
+
+    // Servidor travou 640 ms e 6 dos 8 jogadores congestionaram no mesmo segundo.
+    var peers = new List<VerdictPeerInput>();
+    for (int p = 0; p < 8; p++)
+    {
+        int index = p;
+        peers.Add(PeerOf("P" + p, 100 + p, p == 0, 40, t => PeerSecond(t, congested: (t == 30 || t == 31) && index < 6)));
+    }
+    List<VerdictServerSample> server = ServerOf(40, t => new VerdictServerSample(
+        t, t == 30 ? Health(avgMs: 60, maxMs: 640) : Health(), 0));
+    List<VerdictCause> stalled = IncidentVerdict.Evaluate(peers, server, options);
+    VerdictCause? stall = Find(stalled, "server-stall");
+    Test.True(stall != null, "travada correlacionada gera server-stall");
+    Test.True(stall!.Confidence == VerdictConfidence.High, "6 de 8 no mesmo segundo = confianca alta");
+    Test.True(stall.Sentence.StartsWith("indício de"), "correlacao comeca por 'indício de'");
+    Test.True(stall.Sentence.Contains("640") && stall.Sentence.Contains("6 de 8"), "frase traz a travada e a contagem");
+    Test.Equal("server-stall", stalled[0].Code, "servidor correlacionado lidera a lista");
+    Test.True(Find(stalled, "server-overloaded") == null, "uma travada nao e sobrecarga sustentada");
+
+    // Mesma travada com um jogador so: mede, mas nao correlaciona.
+    var lone = new List<VerdictPeerInput> { PeerOf("Solo", 1, true, 40, t => PeerSecond(t, congested: t == 30)) };
+    VerdictCause? loneStall = Find(IncidentVerdict.Evaluate(lone, server, options), "server-stall");
+    Test.True(loneStall != null && loneStall.Confidence == VerdictConfidence.Medium, "um jogador so: confianca media");
+    Test.True(!loneStall!.Sentence.StartsWith("indício de"), "sem correlacao a frase e uma medida, nao um indicio");
+
+    // Servidor lento sem pico algum: frame medio de 90 ms por 20 s.
+    List<VerdictServerSample> slow = ServerOf(40, t => new VerdictServerSample(t, t >= 15 && t < 35 ? Health(avgMs: 90, maxMs: 130) : Health(), 0));
+    List<VerdictCause> overloaded = IncidentVerdict.Evaluate(peers, slow, options);
+    VerdictCause? load = Find(overloaded, "server-overloaded");
+    Test.True(load != null, "frame medio de 90 ms sustentado gera server-overloaded");
+    Test.True(Find(overloaded, "server-stall") == null, "sem pico nao ha server-stall");
+    Test.True(load!.Sentence.Contains("90"), "frase traz o frame medio");
+
+    // Servidor saudavel: nada do servidor.
+    List<VerdictCause> healthy = IncidentVerdict.Evaluate(peers, ServerOf(40, t => new VerdictServerSample(t, Health(), 0)), options);
+    Test.True(Find(healthy, "server-stall") == null && Find(healthy, "server-overloaded") == null, "servidor saudavel nao e acusado");
+
+    // Salvamento do mundo e nomeado.
+    VerdictCause? save = Find(IncidentVerdict.Evaluate(peers, ServerOf(40, t => new VerdictServerSample(t, Health(), t == 30 ? 700 : 0)), options), "server-stall");
+    Test.True(save != null && save.Sentence.Contains("salvamento do mundo"), "save longo vira 'salvamento do mundo'");
+}
+
+{
+    var options = new VerdictOptions();
+    List<VerdictServerSample> calmServer = ServerOf(40, t => new VerdictServerSample(t, Health(), 0));
+
+    // Conexao ruim so de quem disparou; o vizinho calmo nao e acusado.
+    var peers = new List<VerdictPeerInput>
+    {
+        PeerOf("Ruim", 1, true, 40, t => PeerSecond(t, ping: t % 2 == 0 ? 40 : 130, local: t == 20 ? 0.7 : 0.99)),
+        PeerOf("Calmo", 2, false, 40, t => PeerSecond(t, ping: t % 2 == 0 ? 40 : 130, local: t == 20 ? 0.7 : 0.99)),
+    };
+    List<VerdictCause> causes = IncidentVerdict.Evaluate(peers, calmServer, options);
+    VerdictCause? bad = Find(causes, "bad-connection", "Ruim");
+    Test.True(bad != null && bad.Confidence == VerdictConfidence.High, "jitter e perda juntos = confianca alta");
+    Test.True(bad!.Sentence.StartsWith("indício de conexão ruim de Ruim"), "frase de conexao ruim");
+    Test.True(bad.Sentence.Contains("0,70") && bad.Sentence.Contains("30%"), "qualidade com virgula e perda em %");
+    Test.True(Find(causes, "bad-connection", "Calmo") == null, "jogador que nao disparou nao e avaliado");
+
+    // Sem ninguem disparando (marcador manual), todos entram.
+    var all = new List<VerdictPeerInput>
+    {
+        PeerOf("A", 1, false, 40, t => PeerSecond(t, ping: t % 2 == 0 ? 40 : 130)),
+        PeerOf("B", 2, false, 40, t => PeerSecond(t)),
+    };
+    List<VerdictCause> manual = IncidentVerdict.Evaluate(all, calmServer, options);
+    Test.True(Find(manual, "bad-connection", "A") != null && Find(manual, "bad-connection", "B") == null, "sem disparador, todos sao avaliados");
+
+    // Ping alto com muito unacked: NAO e saturacao nem conexao ruim.
+    var highPing = new List<VerdictPeerInput>
+    {
+        PeerOf("Longe", 3, true, 40, t => PeerSecond(t, ping: 240 + (t % 3), unacked: 250 * 1024, outBps: 80 * 1024, pending: 0)),
+    };
+    List<VerdictCause> farAway = IncidentVerdict.Evaluate(highPing, calmServer, options);
+    Test.True(Find(farAway, "link-saturated") == null, "ping alto com unacked alto NAO vira link-saturated");
+    Test.True(Find(farAway, "bad-connection") == null, "ping alto e estavel NAO vira conexao ruim");
+    Test.Equal(IncidentVerdict.NoCause, IncidentVerdict.Format(farAway), "sem regra casada, o texto diz isso");
+
+    // Saturacao de verdade.
+    var saturated = new List<VerdictPeerInput>
+    {
+        PeerOf("Cheio", 4, true, 40, t => PeerSecond(t, rate: 150 * 1024, outBps: 148 * 1024, pending: t >= 20 ? 60 * 1024 : 0)),
+    };
+    VerdictCause? sat = Find(IncidentVerdict.Evaluate(saturated, calmServer, options), "link-saturated", "Cheio");
+    Test.True(sat != null && sat.Sentence.StartsWith("indício de link saturado") && sat.Sentence.Contains("148"), "saturacao real e dita em KiB/s");
+
+    // Carregando e teleportando entram no veredito sem gatilho proprio.
+    var loading = new List<VerdictPeerInput>
+    {
+        PeerOf("Chegando", 5, true, 40, t => PeerSecond(t, ready: t >= 35, congested: t == 10)),
+        PeerOf("Pulando", 6, true, 40, t => PeerSecond(t, teleporting: t >= 38)),
+    };
+    List<VerdictCause> context = IncidentVerdict.Evaluate(loading, calmServer, options);
+    VerdictCause? loadCause = Find(context, "client-loading", "Chegando");
+    Test.True(loadCause != null && loadCause.Sentence.Contains("carregando o mundo"), "cliente nao pronto vira client-loading");
+    Test.True(loadCause!.Confidence == VerdictConfidence.Medium, "carregou e ja terminou: confianca media");
+    VerdictCause? tp = Find(context, "client-teleporting", "Pulando");
+    Test.True(tp != null && tp.Confidence == VerdictConfidence.High, "ainda teleportando no fim: confianca alta");
+}
+
+{
+    var options = new VerdictOptions();
+    var peers = new List<VerdictPeerInput> { PeerOf("A", 1, true, 70, t => PeerSecond(t)) };
+
+    // Churn: 1200 ZDOs/s por 60 s e depois 5000/s.
+    List<VerdictServerSample> churn = ServerOf(70, t => new VerdictServerSample(t, Health(), 0, 800_000, t < 62 ? 600 : 2500, t < 62 ? 600 : 2500, 10));
+    VerdictCause? c = Find(IncidentVerdict.Evaluate(peers, churn, options), "zdo-churn");
+    Test.True(c != null && c.Sentence.StartsWith("indício de carga de objetos"), "salto de ZDOs vira zdo-churn");
+
+    // Contador ilegivel (-1) nao acusa nada.
+    List<VerdictServerSample> blind = ServerOf(70, t => new VerdictServerSample(t, Health(), 0));
+    Test.True(Find(IncidentVerdict.Evaluate(peers, blind, options), "zdo-churn") == null, "sem contadores nao ha churn");
+
+    // Ordem: confianca e depois pontuacao; formato final.
+    var mixed = new List<VerdictPeerInput>();
+    for (int p = 0; p < 4; p++) mixed.Add(PeerOf("P" + p, p, p == 0, 40, t => PeerSecond(t, congested: t == 30)));
+    List<VerdictCause> ordered = IncidentVerdict.Evaluate(
+        mixed, ServerOf(40, t => new VerdictServerSample(t, t == 30 ? Health(maxMs: 900) : Health(), 0)), options);
+    for (int i = 1; i < ordered.Count; i++) Test.True((int)ordered[i - 1].Confidence >= (int)ordered[i].Confidence, "causas ordenadas por confianca");
+    string text = IncidentVerdict.Format(ordered);
+    Test.True(text.StartsWith("server-stall [alta]: indício de servidor travado"), "Format abre pela causa mais forte");
+    Test.True(!text.Contains('\n') && !text.Contains('"'), "texto cabe numa celula de CSV");
+    Test.Equal(IncidentVerdict.NoCause, IncidentVerdict.Format(new List<VerdictCause>()), "lista vazia");
+    Test.Equal(0, IncidentVerdict.Evaluate(null, null, null).Count, "entradas nulas nao quebram");
+}
+
 Test.Summary();
 
 static class Test
