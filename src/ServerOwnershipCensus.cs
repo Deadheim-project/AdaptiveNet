@@ -24,6 +24,7 @@ namespace AdaptiveNet
         private static readonly Dictionary<long, double> SampleTimes = new Dictionary<long, double>();
         private static readonly CensusPlanner Planner = new CensusPlanner();
         private static readonly Stopwatch Clock = new Stopwatch();
+        private static readonly Dictionary<long, int> ScanOwners = new Dictionary<long, int>();
         private static FieldInfo _sectorField;
         private static ManualLogSource _log;
         private static bool _disabled;
@@ -188,6 +189,7 @@ namespace AdaptiveNet
             int byServer = 0;
             int unowned = 0;
             bool truncated = false;
+            ScanOwners.Clear();
             Clock.Restart();
             for (int dx = -radius; dx <= radius && !truncated; dx++)
             {
@@ -208,6 +210,11 @@ namespace AdaptiveNet
                         if (zdo == null || !IsCreature(zdo.GetPrefab())) continue;
                         ZDOID id = zdo.m_uid;
                         long owner = zdo.GetOwner();
+                        if (owner != 0L && owner != serverUid)
+                        {
+                            ScanOwners.TryGetValue(owner, out int already);
+                            ScanOwners[owner] = already + 1;
+                        }
                         if (!tally.Add(new ZdoKey(id.UserID, id.ID), owner)) continue;
                         creatures++;
                         if (owner == 0L) unowned++;
@@ -217,6 +224,8 @@ namespace AdaptiveNet
                 }
             }
             Clock.Stop();
+            // Para o eco ao dono: quantas criaturas cada dono simula perto deste jogador.
+            foreach (KeyValuePair<long, int> pair in ScanOwners) OwnerEchoRuntime.RecordNear(pair.Key, peer.m_uid, pair.Value, now);
             double costMs = Clock.Elapsed.TotalMilliseconds;
             Samples[peer.m_uid] = new PeerCensusSample(creatures, byPeer, byServer, unowned, visited, costMs, 0d, truncated);
             SampleTimes[peer.m_uid] = now;
