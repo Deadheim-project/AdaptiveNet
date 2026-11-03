@@ -48,6 +48,11 @@ namespace AdaptiveNet
         public ConfigEntry<KeyCode> OverlayKey { get; private set; }
         public ConfigEntry<KeyCode> IncidentMarkerKey { get; private set; }
         public ConfigEntry<float> LogIntervalSeconds { get; private set; }
+        public ConfigEntry<bool> GroupCapture { get; private set; }
+        public ConfigEntry<int> GroupCaptureSeconds { get; private set; }
+        public ConfigEntry<float> GroupCaptureTimeoutSeconds { get; private set; }
+        public ConfigEntry<int> GroupCaptureMinIntervalSeconds { get; private set; }
+        public ConfigEntry<KeyCode> GroupCaptureKey { get; private set; }
         public ConfigEntry<bool> CsvTelemetry { get; private set; }
         public ConfigEntry<bool> IncidentTelemetry { get; private set; }
         public ConfigEntry<float> ClientReportIntervalSeconds { get; private set; }
@@ -172,6 +177,16 @@ namespace AdaptiveNet
                     "Toggle the lightweight in-game diagnostics overlay. None = no key (Deadheim: ESC > Deadheim > Admin > Painel de rede)."),
                 IncidentMarkerKey = config.Bind("Diagnostics", "IncidentMarkerShortcut", KeyCode.None,
                     "Client key that asks the server to preserve the current diagnostic history. None = no key (Deadheim: ESC > Deadheim > Admin > Marcar incidente de rede)."),
+                GroupCapture = Synced(config.Bind("GroupCapture", "GroupCapture", true,
+                    "Admin on-demand group capture: the server asks every client with AdaptiveNet for its own last seconds (frame, GC, focus, ping/quality, send rate) and writes them, aligned by UTC second, to group-capture-<date>.csv beside the incident files. Only admins can start one; the server checks the admin list.")),
+                GroupCaptureSeconds = Synced(config.Bind("GroupCapture", "Seconds", 60,
+                    new ConfigDescription("Seconds of client history requested by default (hard maximum 120).", new AcceptableValueRange<int>(10, 120)))),
+                GroupCaptureTimeoutSeconds = Synced(config.Bind("GroupCapture", "TimeoutSeconds", 8f,
+                    new ConfigDescription("How long the server waits for the clients' replies; the ones that miss it are listed as timed out.", new AcceptableValueRange<float>(3f, 30f)))),
+                GroupCaptureMinIntervalSeconds = Synced(config.Bind("GroupCapture", "MinIntervalSeconds", 120,
+                    new ConfigDescription("Minimum seconds between two group captures, server-wide.", new AcceptableValueRange<int>(120, 3600)))),
+                GroupCaptureKey = config.Bind("GroupCapture", "Shortcut", KeyCode.None,
+                    "Client key that asks the server for a group capture (admins only; the server ignores anyone else). None = no key."),
                 LogIntervalSeconds = config.Bind("Diagnostics", "LogIntervalSeconds", 15f,
                     new ConfigDescription("Aggregate telemetry log interval; zero disables periodic lines.", new AcceptableValueRange<float>(0f, 300f))),
                 CsvTelemetry = config.Bind("Diagnostics", "CsvTelemetry", false,

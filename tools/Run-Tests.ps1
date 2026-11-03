@@ -25,7 +25,7 @@ Write-Host 'Building AdaptiveNet (Release)...'
     -p:ValheimInstall=$ValheimInstall -v quiet --nologo
 if ($LASTEXITCODE -ne 0) { throw "AdaptiveNet build failed ($LASTEXITCODE)." }
 
-$suites = @('ControllerTests', 'StallCorrelationTests', 'SamplingTests', 'PvpTests', 'AssemblyGuardTests')
+$suites = @('ControllerTests', 'StallCorrelationTests', 'SamplingTests', 'PvpTests', 'GroupCaptureTests', 'AssemblyGuardTests')
 if (-not $SkipWireTests) { $suites += 'WireTests' }
 
 $failures = [System.Collections.Generic.List[string]]::new()
