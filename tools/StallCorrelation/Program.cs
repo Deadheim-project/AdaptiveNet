@@ -1,10 +1,10 @@
 using System.Globalization;
 using StallCorrelation;
 
-// Uso: StallCorrelation <csv|pasta>... [--limiar ms] [--listar-alone]
+// Uso: StallCorrelation <csv|pasta>... [--limiar ms] [--listar-alone] [--sem-servidor]
 // Ferramenta offline: le CSVs de incidentes (caixa-preta) e responde se os stalls coincidem.
 double threshold = 250;
-bool listAlone = false;
+bool listAlone = false, noServer = false;
 var inputs = new List<string>();
 for (int i = 0; i < args.Length; i++)
 {
@@ -16,8 +16,11 @@ for (int i = 0; i < args.Length; i++)
         case "--listar-alone":
             listAlone = true;
             break;
+        case "--sem-servidor":
+            noServer = true;
+            break;
         case "-h" or "--ajuda":
-            Console.WriteLine("Uso: StallCorrelation <csv|pasta>... [--limiar ms (padrao 250)] [--listar-alone]");
+            Console.WriteLine("Uso: StallCorrelation <csv|pasta>... [--limiar ms (padrao 250)] [--listar-alone] [--sem-servidor]");
             return 0;
         default:
             inputs.Add(args[i]);
@@ -45,5 +48,5 @@ foreach (var file in files.OrderBy(f => f, StringComparer.Ordinal))
 
 Console.WriteLine($"Arquivos: {files.Count}; linhas: {summary.Rows}; linhas de jogador usadas: {summary.PlayerRowsUsed}, " +
                   $"ignoradas (sem foco/pronto/relatorio fresco ou teleportando): {summary.PlayerRowsIgnored}");
-Console.Write(ReportWriter.Format(Analyzer.Analyze(samples, options), listAlone));
+Console.Write(ReportWriter.Format(Analyzer.Analyze(noServer ? samples.Where(x => x.Machine != Machines.Server) : samples, options), listAlone));
 return 0;

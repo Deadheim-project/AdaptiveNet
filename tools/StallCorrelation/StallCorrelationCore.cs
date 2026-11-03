@@ -209,8 +209,10 @@ public static class Analyzer
 
     private static Verdict Decide(double expected, int observed, double pUp, double pLow)
     {
-        if (expected < MinExpectedForVerdict) return Verdict.InsufficientData;
+        // Um excesso significativo vale mesmo com esperado pequeno (o Poisson e exato ali);
+        // so a conclusao "coincidencia" exige esperado suficiente para ter poder.
         if (pUp < Alpha) return Verdict.Shared;
+        if (expected < MinExpectedForVerdict) return Verdict.InsufficientData;
         if (pLow < Alpha) return Verdict.Independent;
         return Verdict.Coincidence;
     }
@@ -311,8 +313,10 @@ public static class IncidentCsv
             if (!ok) { summary.PlayerRowsIgnored++; continue; }
             TryNum(f, index, "client_frame_max_ms", out double cl);
             summary.PlayerRowsUsed++;
-            string uid = Get(f, index, "uid");
-            yield return new MachineSecond(second, "uid:" + uid, Get(f, index, "player"), cl >= options.ThresholdMs);
+            // O uid muda a cada conexao; o nome junta as sessoes do mesmo jogador (taxa menos ruidosa).
+            string name = Get(f, index, "player");
+            string key = name.Length > 0 ? "nome:" + name : "uid:" + Get(f, index, "uid");
+            yield return new MachineSecond(second, key, name.Length > 0 ? name : key, cl >= options.ThresholdMs);
         }
     }
 
