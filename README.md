@@ -106,6 +106,17 @@ Os campos `server_*` mostram a visão do servidor para aquele jogador. Os campos
 
 Alt-tab, jogador ainda sem personagem e teleporte real são marcados no relatório e não disparam sozinhos uma anomalia de frame. O mod nunca chama `GC.Collect()`.
 
+### Quem simula os mobs (censo de donos, protocolo 3)
+
+Até a 0.5.4 as colunas de ownership e `mobs=` davam sempre 0 no servidor dedicado: ele só enxerga os objetos que instanciou, e quem instancia (e simula) os mobs são os clientes. Agora são duas medidas independentes, que se conferem:
+
+- **Servidor, por ZDO** (`OwnerCensus`): para cada jogador, olha só os setores ao redor dele (`OwnerCensusZoneRadius`, padrão 3x3) no índice de setores do `ZDOMan` e, nos ZDOs cujo prefab é uma criatura (`Character` que não é jogador, resolvido uma vez por hash e guardado em cache), conta `GetOwner()` por uid. Não instancia nada e não varre os cerca de 860 mil ZDOs. Faz **uma varredura de um jogador por passo** (`OwnerCensusPeerIntervalSeconds`), adia a próxima se a anterior gastou mais que `OwnerCensusBudgetMsPerSecond`, corta varreduras acima de `OwnerCensusMaxZdosPerScan` e se desliga sozinho, com aviso, se três varreduras seguidas passarem de `OwnerCensusMaxScanMs`. Um ZDO que cai na área de dois jogadores conta uma vez por ciclo.
+- **Cliente, protocolo 3**: o relatório cliente→servidor acrescenta as IAs que ele instanciou (`BaseAI.Instances`), quantas ele simula (`ZNetView.IsOwner`) e quantas são de outro dono, mais CPU do processo (ms/s), CPU do sistema (`GetSystemTimes`, só Windows) e memória do processo. Um relatório de protocolo 2 ainda é aceito e os campos novos aparecem como não medidos (`-1` no CSV). **Servidor e launcher precisam ser da mesma versão** (o ServerSync já exige): um protocolo mais novo que o do servidor é recusado.
+
+No CSV de incidentes, as colunas novas ficam no fim: `census_creatures_near`, `census_owned_by_peer`, `census_owned_by_server`, `census_unowned`, `census_owned_by_others`, `census_zdos_visited`, `census_scan_ms`, `census_age_s`, `census_truncated` e `client_ai_instances`, `client_ai_owned`, `client_ai_other`, `client_process_cpu_ms_s`, `client_system_cpu_pct`, `client_process_memory_mib` (`-1` = não medido). As colunas `owned_nonplayer_characters`, `ownership_*` e `*_nonplayer_characters` passam a vir do mesmo censo (totais do último ciclo completo). A cada `LogIntervalSeconds` sai uma linha `ownership census ...` com ciclos, criaturas, sem dono, do servidor, os maiores donos, custo médio/máximo da varredura e ZDOs visitados.
+
+**Cruzamento:** quando o que o cliente diz simular e o que o servidor conta para ele diferem em pelo menos `OwnershipDisagreementMinCreatures` e em 50% (por três segundos seguidos, no máximo um aviso a cada 2 minutos por jogador), o log traz `Ownership disagreement ...`. As duas áreas não são idênticas, então uma diferença isolada não prova nada; uma diferença persistente aponta atraso de transferência de dono ou censo velho. O raio do censo (1) e a área que o cliente instancia ainda precisam ser validados no jogo.
+
 ## Telemetria de PvP
 
 No Valheim, o atacante acerta onde ele vê a vítima, e o bloqueio/parry é decidido no cliente da vítima quando o `RPC_Damage` chega. Tudo o que o jogo manda — ZDOs e RPCs de dano — vai numa única fila confiável e ordenada por conexão, então um golpe espera atrás dos ZDOs já enfileirados. A partir da 0.5.0 o servidor mede as partes desse atraso que dependem dele:
