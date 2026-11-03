@@ -1,3 +1,4 @@
+using System;
 using BepInEx.Configuration;
 using AdaptiveNet.Core;
 using ServerSync;
@@ -61,6 +62,16 @@ namespace AdaptiveNet
         public ConfigEntry<int> IncidentFileMaxMiB { get; private set; }
         public ConfigEntry<int> RetainedIncidentFiles { get; private set; }
         public ConfigEntry<int> IncidentRetentionDays { get; private set; }
+        public ConfigEntry<float> ServerFrameTargetMs { get; private set; }
+        public ConfigEntry<float> ServerOverloadFactor { get; private set; }
+        public ConfigEntry<int> ServerOverloadSeconds { get; private set; }
+        public ConfigEntry<float> VerdictJitterThresholdMs { get; private set; }
+        public ConfigEntry<float> VerdictLossThreshold { get; private set; }
+        public ConfigEntry<int> SaturationSeconds { get; private set; }
+        public ConfigEntry<int> SaturationPendingFloorKiB { get; private set; }
+        public ConfigEntry<int> PendingGrowthKiB { get; private set; }
+        public ConfigEntry<float> ChurnFactor { get; private set; }
+        public ConfigEntry<int> ChurnFloorPerSecond { get; private set; }
 
         public static Settings Bind(ConfigFile config, ConfigSync sync)
         {
@@ -172,9 +183,50 @@ namespace AdaptiveNet
                 RetainedIncidentFiles = Synced(config.Bind("Diagnostics", "RetainedIncidentFiles", 16,
                     new ConfigDescription("Maximum incident CSV files retained.", new AcceptableValueRange<int>(2, 500)))),
                 IncidentRetentionDays = Synced(config.Bind("Diagnostics", "IncidentRetentionDays", 7,
-                    new ConfigDescription("Delete AdaptiveNet incident files older than this many days.", new AcceptableValueRange<int>(1, 90))))
+                    new ConfigDescription("Delete AdaptiveNet incident files older than this many days.", new AcceptableValueRange<int>(1, 90)))),
+                // Verdict thresholds are read on the server only, so none is synced.
+                ServerFrameTargetMs = config.Bind("Verdict", "ServerFrameTargetMs", 50f,
+                    new ConfigDescription("Frame time the server should keep. A dedicated server in batchmode settles near 30 FPS (33 ms), well under this.", new AcceptableValueRange<float>(10f, 200f))),
+                ServerOverloadFactor = config.Bind("Verdict", "ServerOverloadFactor", 1.5f,
+                    new ConfigDescription("The server counts as overloaded (server-overloaded) when its median frame average stays at or above target x this factor.", new AcceptableValueRange<float>(1.1f, 10f))),
+                ServerOverloadSeconds = config.Bind("Verdict", "ServerOverloadSeconds", 10,
+                    new ConfigDescription("Seconds the median frame average must stay above the overload limit.", new AcceptableValueRange<int>(3, 120))),
+                VerdictJitterThresholdMs = config.Bind("Verdict", "JitterThresholdMs", 40f,
+                    new ConfigDescription("Mean second-to-second ping change that counts as a bad connection in the verdict.", new AcceptableValueRange<float>(5f, 500f))),
+                VerdictLossThreshold = config.Bind("Verdict", "ApproximateLossThreshold", 0.15f,
+                    new ConfigDescription("1 - lowest Steam connection quality in the window that counts as a bad connection (an approximation of packet loss).", new AcceptableValueRange<float>(0.02f, 1f))),
+                SaturationSeconds = config.Bind("Verdict", "SaturationSeconds", 5,
+                    new ConfigDescription("Seconds of output at the Steam rate with bytes pending, or of pending bytes only growing, before link-saturated is named. Unacknowledged bytes never count.", new AcceptableValueRange<int>(2, 60))),
+                SaturationPendingFloorKiB = config.Bind("Verdict", "SaturationPendingFloorKiB", 8,
+                    new ConfigDescription("Pending KiB (not counting unacknowledged) needed for the link to count as saturated.", new AcceptableValueRange<int>(1, 4096))),
+                PendingGrowthKiB = config.Bind("Verdict", "PendingGrowthKiB", 32,
+                    new ConfigDescription("KiB the pending bytes must grow by within SaturationSeconds to count as a saturated link.", new AcceptableValueRange<int>(1, 4096))),
+                ChurnFactor = config.Bind("Verdict", "ZdoChurnFactor", 3f,
+                    new ConfigDescription("ZDOs moved in a second (sent + received) that count as object churn when this many times the median of the previous 60 s.", new AcceptableValueRange<float>(1.5f, 50f))),
+                ChurnFloorPerSecond = config.Bind("Verdict", "ZdoChurnFloorPerSecond", 2000,
+                    new ConfigDescription("ZDOs per second below which a rise is never called churn, however large the ratio.", new AcceptableValueRange<int>(1, 1000000)))
             };
             return settings;
+        }
+
+        public VerdictOptions BuildVerdictOptions()
+        {
+            return new VerdictOptions
+            {
+                FrameStallThresholdMs = FrameStallThresholdMs.Value,
+                SevereFrameStallThresholdMs = Math.Max(FrameStallThresholdMs.Value, SevereFrameStallThresholdMs.Value),
+                DeliveryDelayThresholdMs = ClientReportDelayThresholdMs.Value,
+                ServerFrameTargetMs = ServerFrameTargetMs.Value,
+                ServerOverloadFactor = ServerOverloadFactor.Value,
+                ServerOverloadSeconds = ServerOverloadSeconds.Value,
+                JitterThresholdMs = VerdictJitterThresholdMs.Value,
+                LossThreshold = VerdictLossThreshold.Value,
+                SaturationSeconds = SaturationSeconds.Value,
+                SaturationPendingFloorBytes = SaturationPendingFloorKiB.Value * 1024,
+                PendingGrowthBytes = PendingGrowthKiB.Value * 1024,
+                ChurnFactor = ChurnFactor.Value,
+                ChurnFloorPerSecond = ChurnFloorPerSecond.Value
+            };
         }
 
         public AdaptiveControllerOptions BuildControllerOptions()

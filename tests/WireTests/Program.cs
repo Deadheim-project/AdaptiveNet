@@ -146,8 +146,13 @@ Assert.Equal(
 string[] incidentColumns = IncidentTelemetry.HeaderForTesting.Split(',');
 Assert.Equal(75, Array.IndexOf(incidentColumns, "server_owned_nonplayer_characters"),
     "the incident columns from 0.4 keep their positions");
-Assert.True(IncidentTelemetry.HeaderForTesting.EndsWith(",client_hit_upload_max_ms,server_world_save_ms"),
-    "PvP columns are appended at the end of the incident CSV");
+Assert.True(IncidentTelemetry.HeaderForTesting.Contains(",client_hit_upload_max_ms,server_world_save_ms,"),
+    "PvP columns keep their place in the incident CSV");
+Assert.True(IncidentTelemetry.HeaderForTesting.EndsWith(",server_world_save_ms,verdict"),
+    "the verdict column is appended last");
+string verdictRow = IncidentTelemetry.FormatForTesting(1, "pre", "wire-test", point, "server-stall [alta]: servidor travou 640 ms, 6 de 8");
+Assert.True(verdictRow.EndsWith(",\"server-stall [alta]: servidor travou 640 ms, 6 de 8\""),
+    "the verdict is quoted as the last cell, commas inside included");
 var pvpPoint = new PeerTelemetryPoint(
     DateTime.UtcNow.Ticks,
     13.5d,

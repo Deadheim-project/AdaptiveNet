@@ -101,10 +101,28 @@ Alguns rótulos importantes na coluna `trigger`:
 | `client-gc-correlated-stall` / `server-gc-correlated-stall` | Houve coleta de GC no mesmo frame travado; é correlação, não prova isolada de causalidade. |
 | `client-report-missing` | O cliente nunca entregou um relatório compatível, mesmo depois de `ClientReportMissingSeconds` com o personagem já no jogo (cliente sem o mod ou com versão incompatível). A contagem começa quando o personagem existe, não na conexão: o carregamento do mundo leva dezenas de segundos e, antes da 0.5.1, abria um incidente a cada login. Um cliente que reportava e ficou em silêncio (teleporte, travada) não entra aqui; isso é `telemetry-delayed` ou `client-frame-stall`. |
 | `server-world-save` | O save do mundo prendeu a thread principal do servidor por mais que `FrameStallThresholdMs`; todos os jogadores congelaram juntos. A duração está em `server_world_save_ms`. |
+| `server-overloaded` | Servidor lento sem pico: mediana do frame médio >= 1,5x o alvo de 50 ms por `ServerOverloadSeconds`. Uma vez por episódio. Ver "Veredito por causa". |
 
 Os campos `server_*` mostram a visão do servidor para aquele jogador. Os campos `client_*` vêm do cliente e mostram a direção de upload dele. Comparar os dois permite separar rota ruim, fila cliente→servidor, travada do cliente e travada global do servidor. `owned_nonplayer_characters` conta somente personagens/mobs ativos atribuídos ao jogador; esta versão não transfere ownership.
 
 Alt-tab, jogador ainda sem personagem e teleporte real são marcados no relatório e não disparam sozinhos uma anomalia de frame. O mod nunca chama `GC.Collect()`.
+
+### Veredito por causa
+
+Toda captura recebe um veredito: causas ordenadas por confiança (`alta`, `media`, `baixa`), cada uma com uma frase em português simples. Ele sai em duas linhas do log, na abertura e no fechamento do incidente (`diagnostic incident #N verdict: ... (stage=opening|closing)`), e na última coluna do CSV de incidentes, `verdict`: as linhas `pre` e as `post` do meio levam o veredito da abertura e as linhas finais da janela `post` levam o do fechamento, que já enxerga o incidente inteiro. Nenhuma regra prova a causa: as que leem correlação começam por "indício de", e uma frase sem isso é uma medida direta. Sem regra casada, o texto diz "sem causa identificada".
+
+Só usa o que o servidor já tem, sem mudar o protocolo do relatório do cliente. Os limiares estão na seção `[Verdict]` do cfg (padrões conservadores).
+
+| Causa | Quando aparece |
+|---|---|
+| `server-stall` | Save, GC ou frame longo do servidor (limiares de `FrameStallThresholdMs` / `SevereFrameStallThresholdMs`). Confiança alta quando pelo menos 2 jogadores, e metade dos conectados, mostram sintoma (conexão em backoff, ou cliente em jogo travado/atrasado) no mesmo segundo. |
+| `server-overloaded` | A mediana do frame médio do servidor fica em `ServerFrameTargetMs` x `ServerOverloadFactor` (50 x 1,5 = 75 ms) por `ServerOverloadSeconds`, sem precisar de pico. É também um gatilho de servidor, uma vez por episódio. O dedicado em batchmode roda a ~30 FPS (33 ms), então isso não dispara por si. |
+| `link-saturated` | Saída próxima ao teto Steam da conexão (90%) com bytes pendentes por `SaturationSeconds`, ou bytes pendentes só crescendo. Conta só `pending`; ping alto com muito `unacked` não é saturação. |
+| `bad-connection` | Jitter (variação média do ping segundo a segundo) ou perda aproximada (1 - menor qualidade) acima do limiar. Ping 0 e qualidade 0 são "não medidos" e ficam fora. |
+| `client-loading` / `client-teleporting` | O cliente reportou não estar pronto, ou estar teleportando. Antes eram só silenciados; agora entram no veredito, sem abrir captura por conta própria. |
+| `zdo-churn` | ZDOs enviados + recebidos no segundo (contadores baratos do `ZDOMan`; o mod nunca varre os ZDOs) >= `ZdoChurnFactor` x a mediana dos 60 s anteriores e acima de `ZdoChurnFloorPerSecond`. |
+
+As causas de jogador (`link-saturated`, `bad-connection`, `client-*`) valem para quem disparou o incidente; num marcador manual ou gatilho de servidor, para todos os conectados. Fora do veredito: detalhe de CPU/GPU do cliente, que exigiria protocolo novo.
 
 ## Telemetria de PvP
 

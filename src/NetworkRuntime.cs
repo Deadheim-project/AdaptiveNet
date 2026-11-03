@@ -147,6 +147,12 @@ namespace AdaptiveNet
         private static int _activeIncidentId;
         private static string _activeIncidentTrigger = string.Empty;
         private static double _activeIncidentEndTime;
+        // The verdict written on the capture's rows: the opening one, replaced by the final one
+        // when the post window completes.
+        private static string _activeIncidentVerdict = string.Empty;
+        private static readonly HashSet<long> ActiveIncidentTriggeredUids = new HashSet<long>();
+        private static CircularHistory<VerdictServerSample> _serverHistory = new CircularHistory<VerdictServerSample>(1);
+        private static readonly ServerOverloadTracker OverloadTracker = new ServerOverloadTracker();
         private static double _nextAutomaticIncidentTime;
         private static string _pendingManualTrigger = string.Empty;
         private static double _nextManualIncidentTime;
@@ -203,6 +209,10 @@ namespace AdaptiveNet
             _activeIncidentId = 0;
             _activeIncidentTrigger = string.Empty;
             _activeIncidentEndTime = 0d;
+            _activeIncidentVerdict = string.Empty;
+            ActiveIncidentTriggeredUids.Clear();
+            _serverHistory = new CircularHistory<VerdictServerSample>(_historyCapacity);
+            OverloadTracker.Reset();
             _nextAutomaticIncidentTime = 0d;
             _pendingManualTrigger = string.Empty;
             _nextManualIncidentTime = 0d;
@@ -269,6 +279,10 @@ namespace AdaptiveNet
             _controllerOptions = _settings.BuildControllerOptions();
             AdaptivePeerScheduler.UpdateOptions(_settings.BuildSchedulerOptions());
             _historyCapacity = ComputeHistoryCapacity(_settings);
+            if (_serverHistory.Capacity != _historyCapacity)
+            {
+                _serverHistory = _serverHistory.WithCapacity(_historyCapacity);
+            }
             lock (Gate)
             {
                 foreach (ConnectionContext context in Connections.Values)
@@ -425,6 +439,7 @@ namespace AdaptiveNet
             var samples = new List<ConnectionContext>();
             var currentPoints = new List<PeerTelemetryPoint>();
             string automaticTrigger = string.Empty;
+            var triggeredUids = new HashSet<long>();
 
             if (ZNet.instance != null)
             {
@@ -528,6 +543,7 @@ namespace AdaptiveNet
                     if (!string.IsNullOrEmpty(anomaly))
                     {
                         context.LastAnomalyTime = unscaledTime;
+                        triggeredUids.Add(context.PeerUid);
                         AppendTrigger(ref automaticTrigger,
                             $"player={context.PlayerName};uid={context.PeerUid};reason={anomaly}");
                     }
@@ -544,6 +560,7 @@ namespace AdaptiveNet
                     bool wasDegraded = stale.WasCongested ||
                                        unscaledTime - stale.LastAnomalyTime <= degradedWindowSeconds;
                     if (!wasDegraded) continue;
+                    triggeredUids.Add(stale.PeerUid);
                     AppendTrigger(
                         ref automaticTrigger,
                         $"player={stale.PlayerName};uid={stale.PeerUid};reason=peer-disconnected");
@@ -552,13 +569,25 @@ namespace AdaptiveNet
 
             if (isServer)
             {
+                VerdictOptions verdictOptions = _settings.BuildVerdictOptions();
+                // Cheap ZDOMan counters, once per sample; never a walk over the ZDOs.
+                if (!GameAccess.TryReadZdoCounters(out int zdoObjects, out int zdoSent, out int zdoReceived, out int zdoQueue))
+                {
+                    zdoObjects = zdoSent = zdoReceived = zdoQueue = -1;
+                }
+                _serverHistory.Add(new VerdictServerSample(
+                    unscaledTime, intervalHealth, pvp.WorldSaveMilliseconds, zdoObjects, zdoSent, zdoReceived, zdoQueue));
+
+                bool enteredOverload = OverloadTracker.Observe(
+                    intervalHealth, verdictOptions.ServerOverloadSeconds, verdictOptions.ServerOverloadThresholdMs);
                 string serverAnomaly = DiagnosticAnomalyClassifier.ClassifyServer(
                     intervalHealth,
                     _settings.FrameStallThresholdMs.Value,
                     Math.Max(_settings.FrameStallThresholdMs.Value, _settings.SevereFrameStallThresholdMs.Value),
-                    pvp.WorldSaveMilliseconds);
+                    pvp.WorldSaveMilliseconds,
+                    enteredOverload);
                 if (!string.IsNullOrEmpty(serverAnomaly)) AppendTrigger(ref automaticTrigger, serverAnomaly);
-                ProcessIncidents(unscaledTime, currentPoints, automaticTrigger);
+                ProcessIncidents(unscaledTime, currentPoints, automaticTrigger, triggeredUids, verdictOptions);
             }
             else
             {
@@ -747,7 +776,9 @@ namespace AdaptiveNet
         private static void ProcessIncidents(
             double now,
             List<PeerTelemetryPoint> currentPoints,
-            string automaticTrigger)
+            string automaticTrigger,
+            HashSet<long> triggeredUids,
+            VerdictOptions verdictOptions)
         {
             bool hasManualTrigger = !string.IsNullOrEmpty(_pendingManualTrigger);
             string manualTrigger = _pendingManualTrigger;
@@ -758,6 +789,7 @@ namespace AdaptiveNet
                 if (!string.IsNullOrEmpty(automaticTrigger))
                 {
                     AppendTrigger(ref _activeIncidentTrigger, automaticTrigger);
+                    ActiveIncidentTriggeredUids.UnionWith(triggeredUids);
                 }
                 if (hasManualTrigger)
                 {
@@ -767,22 +799,29 @@ namespace AdaptiveNet
                         "marker",
                         manualTrigger,
                         currentPoints.ToArray(),
-                        true);
+                        true,
+                        _activeIncidentVerdict);
                     _log.LogWarning($"diagnostic marker added to incident #{_activeIncidentId}: {manualTrigger}");
                 }
 
                 bool ending = now >= _activeIncidentEndTime;
+                // The pre and post windows are both in the histories now, so the closing verdict
+                // sees the whole incident; it goes on the last rows of the capture.
+                if (ending) _activeIncidentVerdict = EvaluateVerdict(_activeIncidentId, "closing", ActiveIncidentTriggeredUids, verdictOptions);
                 _incidents?.QueuePoints(
                     _activeIncidentId,
                     "post",
                     _activeIncidentTrigger,
                     currentPoints.ToArray(),
-                    ending);
+                    ending,
+                    _activeIncidentVerdict);
                 if (ending)
                 {
                     _log.LogInfo($"diagnostic incident #{_activeIncidentId} complete; post-window captured.");
                     _activeIncidentId = 0;
                     _activeIncidentTrigger = string.Empty;
+                    _activeIncidentVerdict = string.Empty;
+                    ActiveIncidentTriggeredUids.Clear();
                 }
                 return;
             }
@@ -822,15 +861,80 @@ namespace AdaptiveNet
             _activeIncidentEndTime = now + _settings.IncidentPostSeconds.Value;
             _nextAutomaticIncidentTime = now + _settings.IncidentCooldownSeconds.Value;
             if (manualCanStart) _nextManualIncidentTime = now + ManualIncidentIntervalSeconds;
+            ActiveIncidentTriggeredUids.Clear();
+            ActiveIncidentTriggeredUids.UnionWith(triggeredUids);
+            _activeIncidentVerdict = EvaluateVerdict(_activeIncidentId, "opening", ActiveIncidentTriggeredUids, verdictOptions);
             _incidents.QueueHistories(
                 _activeIncidentId,
                 "pre",
                 trigger,
                 contexts.Select(context => context.History),
-                true);
+                true,
+                _activeIncidentVerdict);
             _log.LogWarning(
                 $"diagnostic incident #{_activeIncidentId} started: {trigger}; " +
                 $"preserved up to {_settings.HistorySeconds.Value}s before and will capture {_settings.IncidentPostSeconds.Value}s after.");
+        }
+
+        /// <summary>
+        /// Runs the pure verdict over every connected player's history and the server's, logs it
+        /// and returns the text for the CSV column. A fault here costs the verdict, never the tick.
+        /// </summary>
+        private static string EvaluateVerdict(int incidentId, string stage, HashSet<long> triggeredUids, VerdictOptions options)
+        {
+            try
+            {
+                ConnectionContext[] contexts;
+                lock (Gate) contexts = Connections.Values.ToArray();
+
+                var peers = new List<VerdictPeerInput>(contexts.Length);
+                var ordered = new List<PeerTelemetryPoint>();
+                foreach (ConnectionContext context in contexts)
+                {
+                    ordered.Clear();
+                    context.History.CopyOrderedTo(ordered);
+                    if (ordered.Count == 0) continue;
+                    var samples = new List<VerdictPeerSample>(ordered.Count);
+                    foreach (PeerTelemetryPoint point in ordered) samples.Add(ToVerdictSample(point));
+                    peers.Add(new VerdictPeerInput(
+                        context.PlayerName, context.PeerUid, triggeredUids.Contains(context.PeerUid), samples));
+                }
+                var serverSamples = new List<VerdictServerSample>(_serverHistory.Count);
+                _serverHistory.CopyOrderedTo(serverSamples);
+
+                string text = IncidentVerdict.Format(IncidentVerdict.Evaluate(peers, serverSamples, options));
+                _log.LogInfo($"diagnostic incident #{incidentId} verdict: {text} (stage={stage})");
+                return text;
+            }
+            catch (Exception exception)
+            {
+                _log.LogWarning($"diagnostic incident #{incidentId} verdict skipped: {exception.GetType().Name}: {exception.Message}");
+                return string.Empty;
+            }
+        }
+
+        private static VerdictPeerSample ToVerdictSample(PeerTelemetryPoint point)
+        {
+            NetworkSample network = point.ServerNetwork;
+            RemoteClientTelemetrySnapshot client = point.Client;
+            // An unsampled second has ping and qualities of 0, which the verdict reads as "not measured".
+            return new VerdictPeerSample(
+                point.SessionSeconds,
+                network.Valid ? network.PingMilliseconds : 0,
+                network.Valid ? network.LocalQuality : 0d,
+                network.Valid ? network.RemoteQuality : 0d,
+                network.PendingBytes,
+                network.UnackedBytes,
+                network.QueueDelayMilliseconds,
+                network.TransportSendRateBytesPerSecond,
+                network.OutgoingBytesPerSecond,
+                point.Decision.Congested,
+                client.Available,
+                client.Focused,
+                client.PlayerReady,
+                client.Teleporting,
+                client.Health.MaximumFrameMilliseconds,
+                client.DeliveryDelayMilliseconds);
         }
 
         /// <summary>

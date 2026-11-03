@@ -92,20 +92,24 @@ namespace AdaptiveNet
             "relay_hold_samples,relay_hold_avg_ms,relay_hold_p95_ms,relay_hold_max_ms," +
             "hit_forward_count,hit_forward_avg_ms,hit_forward_max_ms," +
             "zdo_service_calls,zdo_service_gap_max_ms,zdo_queue_refusals," +
-            "client_hit_upload_count,client_hit_upload_avg_ms,client_hit_upload_max_ms,server_world_save_ms";
+            "client_hit_upload_count,client_hit_upload_avg_ms,client_hit_upload_max_ms,server_world_save_ms," +
+            // Incident verdict (opening, or final on the last post row), appended last.
+            "verdict";
 
         internal static string HeaderForTesting => Header;
         internal static string FormatForTesting(
             int incidentId,
             string phase,
             string trigger,
-            PeerTelemetryPoint point) => FormatRow(incidentId, phase, trigger, point);
+            PeerTelemetryPoint point,
+            string verdict = "") => FormatRow(incidentId, phase, trigger, point, verdict);
 
         private sealed class WriteJob
         {
             public int IncidentId;
             public string Phase;
             public string Trigger;
+            public string Verdict;
             public PeerTelemetryPoint[] Points;
             public bool Flush;
         }
@@ -165,7 +169,8 @@ namespace AdaptiveNet
             string phase,
             string trigger,
             CircularHistory<PeerTelemetryPoint> history,
-            bool flush)
+            bool flush,
+            string verdict = null)
         {
             if (!Available || history == null || history.Count == 0) return;
             var points = new List<PeerTelemetryPoint>(history.Count);
@@ -175,6 +180,7 @@ namespace AdaptiveNet
                 IncidentId = incidentId,
                 Phase = phase,
                 Trigger = trigger,
+                Verdict = verdict,
                 Points = points.ToArray(),
                 Flush = flush
             });
@@ -185,7 +191,8 @@ namespace AdaptiveNet
             string phase,
             string trigger,
             IEnumerable<CircularHistory<PeerTelemetryPoint>> histories,
-            bool flush)
+            bool flush,
+            string verdict = null)
         {
             if (!Available || histories == null) return;
             var points = new List<PeerTelemetryPoint>();
@@ -204,6 +211,7 @@ namespace AdaptiveNet
                 IncidentId = incidentId,
                 Phase = phase,
                 Trigger = trigger,
+                Verdict = verdict,
                 Points = points.ToArray(),
                 Flush = flush
             });
@@ -214,7 +222,8 @@ namespace AdaptiveNet
             string phase,
             string trigger,
             PeerTelemetryPoint[] points,
-            bool flush)
+            bool flush,
+            string verdict = null)
         {
             if (!Available || points == null || points.Length == 0) return;
             Queue(new WriteJob
@@ -222,12 +231,13 @@ namespace AdaptiveNet
                 IncidentId = incidentId,
                 Phase = phase,
                 Trigger = trigger,
+                Verdict = verdict,
                 Points = points,
                 Flush = flush
             });
         }
 
-        public void QueuePoint(int incidentId, string phase, string trigger, PeerTelemetryPoint point, bool flush)
+        public void QueuePoint(int incidentId, string phase, string trigger, PeerTelemetryPoint point, bool flush, string verdict = null)
         {
             if (!Available) return;
             Queue(new WriteJob
@@ -235,6 +245,7 @@ namespace AdaptiveNet
                 IncidentId = incidentId,
                 Phase = phase,
                 Trigger = trigger,
+                Verdict = verdict,
                 Points = new[] { point },
                 Flush = flush
             });
@@ -275,7 +286,7 @@ namespace AdaptiveNet
                     EnsureWriter();
                     for (int index = 0; index < job.Points.Length; index++)
                     {
-                        string row = FormatRow(job.IncidentId, job.Phase, job.Trigger, job.Points[index]);
+                        string row = FormatRow(job.IncidentId, job.Phase, job.Trigger, job.Points[index], job.Verdict);
                         int rowBytes = Encoding.UTF8.GetByteCount(row) + 2;
                         RotateIfNeeded(rowBytes);
                         _writer.WriteLine(row);
@@ -345,7 +356,7 @@ namespace AdaptiveNet
             }
         }
 
-        private static string FormatRow(int incidentId, string phase, string trigger, PeerTelemetryPoint point)
+        private static string FormatRow(int incidentId, string phase, string trigger, PeerTelemetryPoint point, string verdict)
         {
             NetworkSample server = point.ServerNetwork;
             RemoteClientTelemetrySnapshot client = point.Client;
@@ -432,7 +443,8 @@ namespace AdaptiveNet
                 pvp.QueueRefusals.ToString(CultureInfo.InvariantCulture),
                 hitUpload.Count.ToString(CultureInfo.InvariantCulture),
                 F(hitUpload.AverageMilliseconds), F(hitUpload.MaximumMilliseconds),
-                F(point.ServerWorldSaveMilliseconds));
+                F(point.ServerWorldSaveMilliseconds),
+                Escape(verdict));
         }
 
         private static string F(double value) => value.ToString("F3", CultureInfo.InvariantCulture);
