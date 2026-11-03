@@ -339,6 +339,10 @@ namespace AdaptiveNet.Core
         public int ChurnBaselineSeconds = 60;
         public int ChurnMinBaselineSamples = 10;
 
+        // mob-owner-lag: median echo round trip to a creature owner, and how many creatures it must simulate near players.
+        public double OwnerEchoLagThresholdMs = 200d;
+        public int OwnerEchoMinMobs = 3;
+
         public double ServerOverloadThresholdMs => ServerFrameTargetMs * ServerOverloadFactor;
     }
 
@@ -422,7 +426,10 @@ namespace AdaptiveNet.Core
             bool clientPlayerReady,
             bool clientTeleporting,
             double clientFrameMaxMilliseconds,
-            double clientDeliveryDelayMilliseconds)
+            double clientDeliveryDelayMilliseconds,
+            double ownerEchoMedianMilliseconds = -1d,
+            int ownerMobsSimulated = -1,
+            string ownerNearPlayers = null)
         {
             Seconds = seconds;
             PingMilliseconds = pingMilliseconds;
@@ -440,6 +447,9 @@ namespace AdaptiveNet.Core
             ClientTeleporting = clientTeleporting;
             ClientFrameMaxMilliseconds = clientFrameMaxMilliseconds;
             ClientDeliveryDelayMilliseconds = clientDeliveryDelayMilliseconds;
+            OwnerEchoMedianMilliseconds = ownerEchoMedianMilliseconds;
+            OwnerMobsSimulated = ownerMobsSimulated;
+            OwnerNearPlayers = ownerNearPlayers ?? string.Empty;
         }
 
         public double Seconds { get; }
@@ -458,6 +468,12 @@ namespace AdaptiveNet.Core
         public bool ClientTeleporting { get; }
         public double ClientFrameMaxMilliseconds { get; }
         public double ClientDeliveryDelayMilliseconds { get; }
+        /// <summary>Median echo round trip server -> this peer -> server; -1 = not measured (never a culprit).</summary>
+        public double OwnerEchoMedianMilliseconds { get; }
+        /// <summary>Creatures this peer simulates near players (census); -1 = not measured.</summary>
+        public int OwnerMobsSimulated { get; }
+        /// <summary>Names of the players near the creatures this peer simulates.</summary>
+        public string OwnerNearPlayers { get; }
     }
 
     internal sealed class VerdictPeerInput
@@ -811,6 +827,7 @@ namespace AdaptiveNet.Core
 
             AddServerCauses(causes, peers, server, options);
             AddChurnCause(causes, server, options);
+            AddOwnerLagCauses(causes, peers, options);
 
             // A player's own causes are about the players that raised the incident; with none (a
             // server trigger, a manual marker) every connected player is looked at.
@@ -976,6 +993,43 @@ namespace AdaptiveNet.Core
                 peak.Ratio / options.ChurnFactor,
                 string.Empty,
                 $"indício de carga de objetos: o servidor moveu {Num(peak.Current, 0)} ZDOs/s, {Num(peak.Ratio, 1)}x a mediana recente ({Num(peak.Median, 0)}/s)"));
+        }
+
+        /// <summary>
+        /// mob-owner-lag: a peer that simulates creatures near players and answers the echo slowly. It is
+        /// about the OWNER, who is often not the player that felt it, so every peer is looked at, not only
+        /// the triggered ones. A peer whose echo was never measured (no mod, no answer) is never named,
+        /// and neither is a second in which the client said it was loading or teleporting.
+        /// </summary>
+        public static void AddOwnerLagCauses(List<VerdictCause> causes, IReadOnlyList<VerdictPeerInput> peers, VerdictOptions options)
+        {
+            for (int index = 0; index < peers.Count; index++)
+            {
+                VerdictPeerInput peer = peers[index];
+                bool found = false;
+                VerdictPeerSample worst = default;
+                for (int sampleIndex = 0; sampleIndex < peer.Samples.Count; sampleIndex++)
+                {
+                    VerdictPeerSample sample = peer.Samples[sampleIndex];
+                    if (sample.OwnerEchoMedianMilliseconds < options.OwnerEchoLagThresholdMs) continue;
+                    if (sample.OwnerMobsSimulated < options.OwnerEchoMinMobs) continue;
+                    if (sample.ClientAvailable && (!sample.ClientPlayerReady || sample.ClientTeleporting)) continue;
+                    if (!found || sample.OwnerEchoMedianMilliseconds > worst.OwnerEchoMedianMilliseconds)
+                    {
+                        worst = sample;
+                        found = true;
+                    }
+                }
+                if (!found) continue;
+                double ratio = worst.OwnerEchoMedianMilliseconds / Math.Max(1d, options.OwnerEchoLagThresholdMs);
+                string where = string.IsNullOrEmpty(worst.OwnerNearPlayers) ? "jogadores" : worst.OwnerNearPlayers;
+                causes.Add(new VerdictCause(
+                    "mob-owner-lag",
+                    ratio >= 2d ? VerdictConfidence.High : VerdictConfidence.Medium,
+                    ratio,
+                    peer.Name,
+                    $"indício de dono com atraso: {peer.Name} responde em {Num(worst.OwnerEchoMedianMilliseconds, 0)} ms e simula {worst.OwnerMobsSimulated} mobs perto de {where}"));
+            }
         }
 
         private static void AddPeerCauses(List<VerdictCause> causes, VerdictPeerInput peer, VerdictOptions options)
