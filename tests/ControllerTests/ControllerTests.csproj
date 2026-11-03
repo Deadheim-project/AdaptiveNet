@@ -11,5 +11,7 @@
     <Compile Include="..\..\src\AdaptiveController.cs" Link="AdaptiveController.cs" />
     <Compile Include="..\..\src\PeerCadencePolicy.cs" Link="PeerCadencePolicy.cs" />
     <Compile Include="..\..\src\DiagnosticModels.cs" Link="DiagnosticModels.cs" />
+    <Compile Include="..\..\src\CharacterOwnershipTelemetry.cs" Link="CharacterOwnershipTelemetry.cs" />
+    <Compile Include="..\..\src\OwnershipCensusCore.cs" Link="OwnershipCensusCore.cs" />
   </ItemGroup>
 </Project>

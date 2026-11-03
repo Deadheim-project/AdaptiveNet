@@ -30,7 +30,8 @@ namespace AdaptiveNet
             int unownedNonPlayerCharacters,
             int serverOwnedNonPlayerCharacters,
             PvpPeerStats pvp = default,
-            double serverWorldSaveMilliseconds = 0d)
+            double serverWorldSaveMilliseconds = 0d,
+            PeerCensusSample census = default)
         {
             UtcTicks = utcTicks;
             SessionSeconds = sessionSeconds;
@@ -48,6 +49,7 @@ namespace AdaptiveNet
             ServerOwnedNonPlayerCharacters = Math.Max(0, serverOwnedNonPlayerCharacters);
             Pvp = pvp;
             ServerWorldSaveMilliseconds = Math.Max(0d, serverWorldSaveMilliseconds);
+            Census = census;
         }
 
         public long UtcTicks { get; }
@@ -66,6 +68,8 @@ namespace AdaptiveNet
         public int ServerOwnedNonPlayerCharacters { get; }
         public PvpPeerStats Pvp { get; }
         public double ServerWorldSaveMilliseconds { get; }
+        /// <summary>Ownership census around this player (server, by sector) - not measured when default.</summary>
+        public PeerCensusSample Census { get; }
     }
 
     internal sealed class IncidentTelemetry : IDisposable
@@ -93,6 +97,10 @@ namespace AdaptiveNet
             "hit_forward_count,hit_forward_avg_ms,hit_forward_max_ms," +
             "zdo_service_calls,zdo_service_gap_max_ms,zdo_queue_refusals," +
             "client_hit_upload_count,client_hit_upload_avg_ms,client_hit_upload_max_ms,server_world_save_ms," +
+            // Ownership census (by sector, server) and protocol 3 client fields; -1 = not measured.
+            "census_creatures_near,census_owned_by_peer,census_owned_by_server,census_unowned,census_owned_by_others," +
+            "census_zdos_visited,census_scan_ms,census_age_s,census_truncated," +
+            "client_ai_instances,client_ai_owned,client_ai_other,client_process_cpu_ms_s,client_system_cpu_pct,client_process_memory_mib," +
             // Incident verdict (opening, or final on the last post row), appended last.
             "verdict";
 
@@ -444,8 +452,26 @@ namespace AdaptiveNet
                 hitUpload.Count.ToString(CultureInfo.InvariantCulture),
                 F(hitUpload.AverageMilliseconds), F(hitUpload.MaximumMilliseconds),
                 F(point.ServerWorldSaveMilliseconds),
+                Measured(point.Census.Measured, point.Census.Creatures),
+                Measured(point.Census.Measured, point.Census.OwnedByPeer),
+                Measured(point.Census.Measured, point.Census.OwnedByServer),
+                Measured(point.Census.Measured, point.Census.Unowned),
+                Measured(point.Census.Measured, point.Census.OwnedByOthers),
+                Measured(point.Census.Measured, point.Census.ZdosVisited),
+                point.Census.Measured ? F(point.Census.ScanMilliseconds) : "-1",
+                point.Census.Measured ? F(point.Census.AgeSeconds) : "-1",
+                point.Census.Measured ? (point.Census.Truncated ? "1" : "0") : "-1",
+                Measured(client.Ai.Measured, client.Ai.Instances),
+                Measured(client.Ai.Measured, client.Ai.Owned),
+                Measured(client.Ai.Measured, client.Ai.Other),
+                client.Machine.Measured ? F(client.Machine.ProcessCpuMsPerSecond) : "-1",
+                client.Machine.Measured ? F(client.Machine.SystemCpuPercent) : "-1",
+                Measured(client.Machine.Measured, client.Machine.ProcessMemoryMiB),
                 Escape(verdict));
         }
+
+        private static string Measured(bool measured, int value) =>
+            measured ? value.ToString(CultureInfo.InvariantCulture) : "-1";
 
         private static string F(double value) => value.ToString("F3", CultureInfo.InvariantCulture);
         private static string Escape(string value) => '"' + (value ?? string.Empty).Replace("\"", "\"\"") + '"';
