@@ -129,7 +129,6 @@ namespace AdaptiveNet
         private static double _nextSampleTime;
         private static double _nextLogTime;
         private static double _nextClientReportTime;
-        private static double _nextOwnershipSampleTime;
         private static readonly OwnershipDisagreementTracker _ownershipDisagreement = new OwnershipDisagreementTracker();
         private static int _historyCapacity;
         private static RuntimeHealthSample _pendingLocalHealth;
@@ -139,8 +138,6 @@ namespace AdaptiveNet
         private static CsvTelemetry _csv;
         private static IncidentTelemetry _incidents;
         private static bool _incidentWriterInitializationFailed;
-        private static bool _ownershipFailureLogged;
-        private static bool _ownershipTelemetryDisabled;
         private static bool _zdoPatchApplied;
         private static string _zdoPatchMessage = "not checked";
         private static DiagnosticsSnapshot _snapshot = new DiagnosticsSnapshot();
@@ -204,14 +201,11 @@ namespace AdaptiveNet
             _nextSampleTime = 0d;
             _nextLogTime = 0d;
             _nextClientReportTime = 0d;
-            _nextOwnershipSampleTime = 0d;
             _historyCapacity = ComputeHistoryCapacity(settings);
             _settingsChanged = false;
             _pendingLocalHealth = default;
             ResetClientContextWindow();
             _incidentWriterInitializationFailed = false;
-            _ownershipFailureLogged = false;
-            _ownershipTelemetryDisabled = false;
             _nextIncidentId = 0;
             _activeIncidentId = 0;
             _activeIncidentTrigger = string.Empty;
