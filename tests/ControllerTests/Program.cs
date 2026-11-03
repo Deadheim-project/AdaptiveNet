@@ -816,7 +816,239 @@ static VerdictCause? Find(IReadOnlyList<VerdictCause> causes, string code, strin
     Test.Equal(0, IncidentVerdict.Evaluate(null, null, null).Count, "entradas nulas nao quebram");
 }
 
+// ---- Eco ao dono: mediana, timeout, "nao medido", escolha e regra mob-owner-lag ----
+{
+    var tracker = new OwnerEchoTracker(window: 4, timeoutSeconds: 2d, staleSeconds: 20d);
+    Test.True(!tracker.Get(7L, 0d).Tracked, "peer nunca sondado nao tem amostra");
+    Test.Equal(-1, tracker.Get(7L, 0d).Samples, "peer nunca sondado reporta -1 amostras");
+
+    // Voltas de 40, 60, 500, 80 ms: a mediana ignora o pico isolado.
+    double[] rounds = { 0.040, 0.060, 0.500, 0.080 };
+    double clock = 0d;
+    foreach (double round in rounds)
+    {
+        Test.True(tracker.IsDue(7L, clock, 4d), "peer na vez de receber eco");
+        long seq = tracker.BeginSend(7L, clock);
+        Test.True(!tracker.IsDue(7L, clock + 10d, 4d), "com eco pendente nao envia outro");
+        Test.True(tracker.Reply(7L, seq, clock + round, out double ms), "resposta da pendente e aceita");
+        Test.Near(round * 1000d, ms, 0.001, "volta em ms");
+        clock += 4d;
+    }
+    OwnerEchoSample sample = tracker.Get(7L, clock);
+    Test.True(sample.Measured, "peer que respondeu esta medido");
+    Test.Near(70d, sample.MedianMilliseconds, 0.001, "mediana de 40,60,80,500 = 70 ms");
+    Test.Near(80d, sample.LastMilliseconds, 0.001, "ultima volta");
+    Test.Equal(4, sample.Samples, "amostras na janela");
+
+    // A janela descarta a mais antiga.
+    long s5 = tracker.BeginSend(7L, clock);
+    tracker.Reply(7L, s5, clock + 0.100, out _);
+    Test.Equal(4, tracker.Get(7L, clock + 1d).Samples, "janela de 4 mantem 4 amostras");
+    Test.Near(90d, tracker.Get(7L, clock + 1d).MedianMilliseconds, 0.001, "mediana de 60,80,100,500 = 90 ms");
+
+    // Resposta duplicada ou de peer nao sondado nao conta.
+    Test.True(!tracker.Reply(7L, s5, clock + 0.2, out _), "resposta duplicada e ignorada");
+    Test.True(!tracker.Reply(99L, s5, clock + 0.2, out _), "resposta de quem nao foi sondado e ignorada");
+
+    // Resposta velha demais deixa de contar como medida.
+    Test.True(!tracker.Get(7L, clock + 60d).Measured, "ultima resposta velha = nao medido");
+}
+{
+    // Timeout: peer que ja respondeu passa a valer o timeout; peer que nunca respondeu continua nao medido.
+    var tracker = new OwnerEchoTracker(window: 4, timeoutSeconds: 2d);
+    long a = tracker.BeginSend(1L, 0d);
+    tracker.Reply(1L, a, 0.050, out _);
+    long late = tracker.BeginSend(1L, 4d);
+    Test.Equal(0, tracker.Expire(5.9d), "antes do timeout nada expira");
+    Test.Equal(1, tracker.Expire(6.1d), "depois de 2 s o pendente expira");
+    OwnerEchoSample after = tracker.Get(1L, 6.1d);
+    Test.Equal(1, after.Timeouts, "timeout contado");
+    Test.True(after.Measured, "quem ja respondeu continua medido");
+    Test.Near(1025d, after.MedianMilliseconds, 0.001, "mediana de 50 ms e do timeout de 2000 ms");
+    Test.True(!tracker.Reply(1L, late, 6.5d, out _), "resposta depois do timeout e ignorada");
+
+    long ghost = 0;
+    for (int attempt = 0; attempt < OwnerEchoTracker.SilentTimeoutsBeforeBackoff; attempt++)
+    {
+        double at = attempt * 4d;
+        Test.True(tracker.IsDue(2L, at, 4d), "peer silencioso e sondado no inicio");
+        ghost = tracker.BeginSend(2L, at);
+        tracker.Expire(at + 2.5d);
+    }
+    OwnerEchoSample silent = tracker.Get(2L, 13d);
+    Test.True(silent.Tracked && !silent.Measured, "peer sem o mod fica sondado mas nao medido");
+    Test.Near(-1d, silent.MedianMilliseconds, 0.0001, "nao medido = -1 ms");
+    Test.Equal(3, silent.Timeouts, "timeouts do peer silencioso contados");
+    Test.True(ghost > 0 && !tracker.IsDue(2L, 20d, 4d), "peer silencioso recua para uma tentativa por minuto");
+    Test.True(tracker.IsDue(2L, 80d, 4d), "e tenta de novo depois do recuo");
+    tracker.Forget(2L);
+    Test.True(!tracker.Get(2L, 80d).Tracked, "Forget remove o peer");
+}
+{
+    var tracker = new OwnerEchoTracker();
+    var owners = new List<KeyValuePair<long, int>>
+    {
+        new KeyValuePair<long, int>(0L, 50),   // sem dono
+        new KeyValuePair<long, int>(10L, 3),
+        new KeyValuePair<long, int>(11L, 40),
+        new KeyValuePair<long, int>(12L, 20),
+        new KeyValuePair<long, int>(13L, 15),
+        new KeyValuePair<long, int>(14L, 9),
+        new KeyValuePair<long, int>(99L, 80),  // servidor / desconectado
+    };
+    List<long> picked = OwnerEchoPlanner.Select(owners, uid => uid != 99L, tracker, 0d, 4d, 4);
+    Test.Equal(4, picked.Count, "escolhe no maximo 4 donos");
+    Test.Equal(11L, picked[0], "o que mais simula vem primeiro");
+    Test.True(!picked.Contains(0L) && !picked.Contains(99L), "sem dono e nao conectado ficam de fora");
+    Test.True(!picked.Contains(10L), "o 5o colocado nao entra");
+    tracker.BeginSend(11L, 0d);
+    List<long> next = OwnerEchoPlanner.Select(owners, uid => uid != 99L, tracker, 1d, 4d, 4);
+    Test.True(!next.Contains(11L), "peer com eco pendente nao recebe outro");
+    Test.Equal(0, OwnerEchoPlanner.Select(owners, uid => true, tracker, 1d, 4d, 0).Count, "maximo 0 nao escolhe ninguem");
+}
+{
+    var near = new OwnerNearMap();
+    near.Record(5L, 100L, 7, 10d);
+    near.Record(5L, 101L, 2, 10d);
+    near.Record(5L, 100L, 9, 12d);
+    List<KeyValuePair<long, int>> list = near.Get(5L, 15d, 30d, out int total);
+    Test.Equal(11, total, "total de mobs perto de jogadores (ultima varredura de cada um)");
+    Test.Equal(100L, list[0].Key, "jogador com mais mobs do dono vem primeiro");
+    near.Get(5L, 100d, 30d, out int stale);
+    Test.Equal(0, stale, "entradas velhas somem");
+    near.Forget(100L);
+    near.Get(5L, 15d, 30d, out int afterForget);
+    Test.Equal(2, afterForget, "Forget do jogador tira os mobs perto dele");
+}
+{
+    var options = new VerdictOptions();
+    Test.Near(200d, options.OwnerEchoLagThresholdMs, 0.001, "limiar padrao do eco = 200 ms");
+    VerdictPeerSample Second(double t, double echo, int mobs, bool ready = true) =>
+        new VerdictPeerSample(t, 50, 0.99, 0.99, 0, 0, 0, 150 * 1024, 20 * 1024, false, true, true, ready, false, 30, 0,
+            echo, mobs, "Ana, Bia");
+    bool HasLag(VerdictPeerInput peer) =>
+        IncidentVerdict.Evaluate(new[] { peer }, new List<VerdictServerSample>(), options).Exists(c => c.Code == "mob-owner-lag");
+
+    var slow = PeerOf("Dede", 1L, false, 6, t => Second(t, 320, 14));
+    var victim = PeerOf("Ana", 2L, true, 6, t => PeerSecond(t));
+    var found = IncidentVerdict.Evaluate(new[] { victim, slow }, new List<VerdictServerSample>(), options);
+    VerdictCause? cause = found.Find(c => c.Code == "mob-owner-lag");
+    Test.True(cause != null, "dono com eco lento e mobs perto de jogadores vira causa");
+    Test.Equal("Dede", cause!.Player, "a causa e sobre o dono, nao sobre a vitima");
+    Test.True(cause.Sentence.StartsWith("indício de dono com atraso: Dede responde em 320 ms e simula 14 mobs perto de Ana, Bia"), "frase da causa");
+    Test.True(cause.Confidence == VerdictConfidence.Medium, "1,6x o limiar = confianca media");
+
+    Test.True(IncidentVerdict.Evaluate(new[] { PeerOf("Dede", 1L, false, 6, t => Second(t, 900, 14)) }, null, options)
+        .Find(c => c.Code == "mob-owner-lag")!.Confidence == VerdictConfidence.High, "4,5x o limiar = confianca alta");
+    Test.True(!HasLag(PeerOf("Dede", 1L, false, 6, t => Second(t, 150, 14))), "abaixo do limiar nao vira causa");
+    Test.True(!HasLag(PeerOf("Dede", 1L, false, 6, t => Second(t, 900, 1))), "dono com poucos mobs nao vira causa");
+    Test.True(!HasLag(PeerOf("Dede", 1L, false, 6, t => Second(t, -1, 14))), "eco nao medido (-1, peer sem o mod) nunca vira culpado");
+    Test.True(!HasLag(PeerOf("Dede", 1L, false, 6, t => Second(t, 900, 14, ready: false))), "cliente carregando o mundo nao e dono com atraso");
+    Test.True(!HasLag(PeerOf("Antigo", 3L, false, 6, t => PeerSecond(t))), "amostra sem campos do eco (padrao) nao dispara a regra");
+}
+
+// ---- CPU do host: /proc/stat, conta de delta e regra do veredito ----
+{
+    string realStat =
+        "cpu  10132153 290696 3084719 46828483 16683 0 25195 175628 0 0\n" +
+        "cpu0 1393280 64966 436308 5775321 2260 0 7103 18420 0 0\n" +
+        "cpu1 1264523 28752 379403 5909552 2043 0 3621 21088 0 0\n" +
+        "intr 1234567 0 0 1\nctxt 98765432\nbtime 1730000000\n";
+    Test.True(ProcStatParser.TryParse(realStat, out CpuTimes parsed), "/proc/stat real e lido");
+    Test.True(parsed.Total == 10132153UL + 290696UL + 3084719UL + 46828483UL + 16683UL + 0UL + 25195UL + 175628UL, "total soma user..steal sem guest");
+    Test.True(parsed.Idle == 46828483UL + 16683UL, "ocioso = idle + iowait");
+    Test.True(parsed.Steal == 175628L, "steal lido");
+
+    Test.True(ProcStatParser.TryParse("cpu  100 0 50 850\n", out CpuTimes old), "kernel antigo com 4 campos");
+    Test.True(old.Steal == -1L && old.Total == 1000UL, "sem steal = nao medido");
+    Test.True(ProcStatParser.TryParse("cpu  100 0 50 850 0 0 0 0 5 5\n", out CpuTimes guest), "guest e guest_nice");
+    Test.True(guest.Total == 1000UL, "guest ja esta em user: nao soma de novo");
+    Test.True(!ProcStatParser.TryParse("", out _), "texto vazio nao e lido");
+    Test.True(!ProcStatParser.TryParse("cpu0 1 2 3 4 5\n", out _), "so a linha agregada vale");
+    Test.True(!ProcStatParser.TryParse("cpu  1 2 x 4 5\n", out _), "campo nao numerico");
+    Test.True(!ProcStatParser.TryParse("cpu  1 2 3\n", out _), "poucos campos");
+
+    var before = new CpuTimes(1000UL, 600UL, 10L);
+    var after = new CpuTimes(1400UL, 700UL, 50L);
+    Test.Near(75d, HostCpuMath.SystemPercent(before, after), 0.0001, "sistema = (delta total - delta ocioso) / delta total");
+    Test.Near(10d, HostCpuMath.StealPercent(before, after), 0.0001, "steal = delta steal / delta total");
+    Test.Near(-1d, HostCpuMath.SystemPercent(after, after), 0.0001, "sem delta = nao medido");
+    Test.Near(-1d, HostCpuMath.SystemPercent(after, before), 0.0001, "contador que voltou = nao medido");
+    Test.Near(-1d, HostCpuMath.StealPercent(new CpuTimes(1000UL, 600UL, -1L), after), 0.0001, "steal ausente = nao medido");
+    Test.Near(-1d, HostCpuMath.SystemPercent(before, new CpuTimes(1400UL, 100UL, 50L)), 0.0001, "ocioso maior que o total = nao medido");
+
+    // Sonda com leitor falso: baseline, valores e falhas que nunca lancam.
+    var reads = new Queue<CpuTimes?>();
+    var fake = new FakeCpuReader(reads);
+    double processMs = 0d;
+    var probe = new HostCpuProbe(fake, () => processMs);
+    reads.Enqueue(new CpuTimes(1000UL, 600UL, 0L));
+    HostCpuSample first = probe.Sample(10d);
+    Test.True(first.Measured && first.SystemCpuPercent < 0d && first.ProcessCpuMsPerSecond < 0d, "primeira amostra so cria o baseline");
+    reads.Enqueue(new CpuTimes(1400UL, 700UL, 40L));
+    processMs = 850d;
+    HostCpuSample second = probe.Sample(11d);
+    Test.Near(75d, second.SystemCpuPercent, 0.0001, "sonda: sistema em %");
+    Test.Near(10d, second.StealPercent, 0.0001, "sonda: steal em %");
+    Test.Near(850d, second.ProcessCpuMsPerSecond, 0.0001, "sonda: processo em ms/s");
+    for (int i = 0; i < 5; i++) { reads.Enqueue(null); probe.Sample(12d + i); }
+    Test.True(probe.Disabled, "falhas seguidas desligam a leitura");
+    Test.True(!probe.Sample(30d).Measured, "desligada = nao medido, sem excecao");
+    var thrower = new HostCpuProbe(fake, () => throw new InvalidOperationException("sem acesso"));
+    Test.True(!thrower.Sample(1d).Measured, "excecao interna vira nao medido");
+
+    var window = new HostCpuLogWindow();
+    Test.True(window.Format() == "hostCpu=n/a", "log sem medida");
+    window.Add(new HostCpuSample(800d, 60d, 0d, 4));
+    window.Add(new HostCpuSample(900d, 95d, 12.5d, 4));
+    Test.True(window.Format() == "hostCpu=proc 850ms/s, sysMax 95%, stealMax 12.5%", "log resume media do processo e maximos: " + window.Format());
+
+    // Regra do veredito.
+    var vo = new VerdictOptions();
+    HostCpuSample Host(double processMsPerSecond, double system, double steal = -1d) =>
+        new HostCpuSample(processMsPerSecond, system, steal, 4);
+    List<VerdictServerSample> Run(Func<int, HostCpuSample> host, double slowAvg = 120d) =>
+        ServerOf(30, t => new VerdictServerSample(t, t >= 10 && t < 16 ? Health(avgMs: slowAvg, maxMs: slowAvg + 40) : Health(), 0, host: host(t)));
+    bool Has(List<VerdictCause> list, string code) => list.Exists(c => c.Code == code);
+
+    List<VerdictCause> starved = IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), Run(t => Host(300d, 96d)), vo);
+    Test.True(Has(starved, "host-cpu-starved") && !Has(starved, "game-cpu-saturated"), "sistema alto com processo baixo = host sem CPU");
+    VerdictCause starvedCause = starved.Find(c => c.Code == "host-cpu-starved");
+    Test.True(starvedCause.Sentence.Contains("sistema a 96%") && starvedCause.Sentence.Contains("300 ms/s"), "frase cita X e Y: " + starvedCause.Sentence);
+    Test.True(starvedCause.Confidence == VerdictConfidence.Medium, "sem steal a confianca e media");
+
+    List<VerdictCause> steal = IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), Run(t => Host(300d, 40d, 22d)), vo);
+    Test.True(Has(steal, "host-cpu-starved") && steal.Find(c => c.Code == "host-cpu-starved").Confidence == VerdictConfidence.High, "steal alto = host sem CPU, confianca alta");
+
+    List<VerdictCause> bound = IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), Run(t => Host(1000d, 30d)), vo);
+    Test.True(Has(bound, "game-cpu-saturated") && !Has(bound, "host-cpu-starved"), "processo em ~1 nucleo = jogo saturado");
+
+    List<VerdictCause> busyButMine = IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), Run(t => Host(1500d, 99d)), vo);
+    Test.True(Has(busyButMine, "game-cpu-saturated") && !Has(busyButMine, "host-cpu-starved"), "sistema alto porque o processo e quem usa = jogo saturado");
+
+    List<VerdictCause> notMeasured = IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), Run(t => default), vo);
+    Test.True(!Has(notMeasured, "host-cpu-starved") && !Has(notMeasured, "game-cpu-saturated"), "sem medida do host nao inventa causa");
+
+    var fine = ServerOf(30, t => new VerdictServerSample(t, Health(), 0, host: Host(300d, 99d, 30d)));
+    Test.True(!Has(IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), fine, vo), "host-cpu-starved"), "host ocupado com o servidor bem nao e causa");
+
+    var one = ServerOf(30, t => new VerdictServerSample(t, t == 10 ? Health(avgMs: 120, maxMs: 160) : Health(), 0, host: Host(300d, 99d)));
+    Test.True(!Has(IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), one, vo), "host-cpu-starved"), "um segundo so nao chega a HostMinSeconds");
+}
+
 Test.Summary();
+
+sealed class FakeCpuReader : ICpuTimesReader
+{
+    private readonly Queue<CpuTimes?> _queue;
+    public FakeCpuReader(Queue<CpuTimes?> queue) { _queue = queue; }
+    public bool TryRead(out CpuTimes times)
+    {
+        CpuTimes? next = _queue.Count > 0 ? _queue.Dequeue() : null;
+        times = next ?? default;
+        return next.HasValue;
+    }
+}
 
 static class Test
 {

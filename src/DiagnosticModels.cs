@@ -334,10 +334,21 @@ namespace AdaptiveNet.Core
         public int SaturationPendingFloorBytes = 8 * 1024;
         public int PendingGrowthBytes = 32 * 1024;
 
+        // Host CPU (server): a slow second with the host this busy, or this much hypervisor steal,
+        // while the game process is not the one using it, points at the machine, not the game.
+        public double HostSystemCpuPercent = 90d;
+        public double HostStealPercent = 10d;
+        public double HostProcessSaturatedMsPerSecond = 900d;
+        public int HostMinSeconds = 2;
+
         public double ChurnFactor = 3d;
         public double ChurnFloorPerSecond = 2000d;
         public int ChurnBaselineSeconds = 60;
         public int ChurnMinBaselineSamples = 10;
+
+        // mob-owner-lag: median echo round trip to a creature owner, and how many creatures it must simulate near players.
+        public double OwnerEchoLagThresholdMs = 200d;
+        public int OwnerEchoMinMobs = 3;
 
         public double ServerOverloadThresholdMs => ServerFrameTargetMs * ServerOverloadFactor;
     }
@@ -422,7 +433,10 @@ namespace AdaptiveNet.Core
             bool clientPlayerReady,
             bool clientTeleporting,
             double clientFrameMaxMilliseconds,
-            double clientDeliveryDelayMilliseconds)
+            double clientDeliveryDelayMilliseconds,
+            double ownerEchoMedianMilliseconds = -1d,
+            int ownerMobsSimulated = -1,
+            string ownerNearPlayers = null)
         {
             Seconds = seconds;
             PingMilliseconds = pingMilliseconds;
@@ -440,6 +454,9 @@ namespace AdaptiveNet.Core
             ClientTeleporting = clientTeleporting;
             ClientFrameMaxMilliseconds = clientFrameMaxMilliseconds;
             ClientDeliveryDelayMilliseconds = clientDeliveryDelayMilliseconds;
+            OwnerEchoMedianMilliseconds = ownerEchoMedianMilliseconds;
+            OwnerMobsSimulated = ownerMobsSimulated;
+            OwnerNearPlayers = ownerNearPlayers ?? string.Empty;
         }
 
         public double Seconds { get; }
@@ -458,6 +475,12 @@ namespace AdaptiveNet.Core
         public bool ClientTeleporting { get; }
         public double ClientFrameMaxMilliseconds { get; }
         public double ClientDeliveryDelayMilliseconds { get; }
+        /// <summary>Median echo round trip server -> this peer -> server; -1 = not measured (never a culprit).</summary>
+        public double OwnerEchoMedianMilliseconds { get; }
+        /// <summary>Creatures this peer simulates near players (census); -1 = not measured.</summary>
+        public int OwnerMobsSimulated { get; }
+        /// <summary>Names of the players near the creatures this peer simulates.</summary>
+        public string OwnerNearPlayers { get; }
     }
 
     internal sealed class VerdictPeerInput
@@ -478,6 +501,25 @@ namespace AdaptiveNet.Core
         public IReadOnlyList<VerdictPeerSample> Samples { get; }
     }
 
+    /// <summary>CPU do processo do servidor e do host na ultima amostra; -1 em cada campo = nao medido.</summary>
+    internal readonly struct HostCpuSample
+    {
+        public HostCpuSample(double processCpuMsPerSecond, double systemCpuPercent, double stealPercent, int cores)
+        {
+            Measured = true;
+            ProcessCpuMsPerSecond = processCpuMsPerSecond < 0d || double.IsNaN(processCpuMsPerSecond) ? -1d : processCpuMsPerSecond;
+            SystemCpuPercent = systemCpuPercent < 0d || double.IsNaN(systemCpuPercent) ? -1d : Math.Min(100d, systemCpuPercent);
+            StealPercent = stealPercent < 0d || double.IsNaN(stealPercent) ? -1d : Math.Min(100d, stealPercent);
+            Cores = Math.Max(1, cores);
+        }
+
+        public bool Measured { get; }
+        public double ProcessCpuMsPerSecond { get; }
+        public double SystemCpuPercent { get; }
+        public double StealPercent { get; }
+        public int Cores { get; }
+    }
+
     internal readonly struct VerdictServerSample
     {
         public VerdictServerSample(
@@ -487,8 +529,10 @@ namespace AdaptiveNet.Core
             int zdoObjects = -1,
             int zdoSentLastSecond = -1,
             int zdoReceivedLastSecond = -1,
-            int zdoClientChangeQueue = -1)
+            int zdoClientChangeQueue = -1,
+            HostCpuSample host = default)
         {
+            Host = host;
             Seconds = seconds;
             Health = health;
             WorldSaveMilliseconds = worldSaveMilliseconds;
@@ -506,6 +550,8 @@ namespace AdaptiveNet.Core
         public int ZdoSentLastSecond { get; }
         public int ZdoReceivedLastSecond { get; }
         public int ZdoClientChangeQueue { get; }
+        /// <summary>Server process and host CPU; not measured when default.</summary>
+        public HostCpuSample Host { get; }
 
         /// <summary>ZDOs the server moved in the second, or -1 when unreadable.</summary>
         public double ZdoTraffic => ZdoSentLastSecond < 0 || ZdoReceivedLastSecond < 0
@@ -811,6 +857,8 @@ namespace AdaptiveNet.Core
 
             AddServerCauses(causes, peers, server, options);
             AddChurnCause(causes, server, options);
+            AddOwnerLagCauses(causes, peers, options);
+            AddHostCpuCause(causes, server, options);
 
             // A player's own causes are about the players that raised the incident; with none (a
             // server trigger, a manual marker) every connected player is looked at.
@@ -976,6 +1024,117 @@ namespace AdaptiveNet.Core
                 peak.Ratio / options.ChurnFactor,
                 string.Empty,
                 $"indício de carga de objetos: o servidor moveu {Num(peak.Current, 0)} ZDOs/s, {Num(peak.Ratio, 1)}x a mediana recente ({Num(peak.Median, 0)}/s)"));
+        }
+
+        /// <summary>
+        /// mob-owner-lag: a peer that simulates creatures near players and answers the echo slowly. It is
+        /// about the OWNER, who is often not the player that felt it, so every peer is looked at, not only
+        /// the triggered ones. A peer whose echo was never measured (no mod, no answer) is never named,
+        /// and neither is a second in which the client said it was loading or teleporting.
+        /// </summary>
+        public static void AddOwnerLagCauses(List<VerdictCause> causes, IReadOnlyList<VerdictPeerInput> peers, VerdictOptions options)
+        {
+            for (int index = 0; index < peers.Count; index++)
+            {
+                VerdictPeerInput peer = peers[index];
+                bool found = false;
+                VerdictPeerSample worst = default;
+                for (int sampleIndex = 0; sampleIndex < peer.Samples.Count; sampleIndex++)
+                {
+                    VerdictPeerSample sample = peer.Samples[sampleIndex];
+                    if (sample.OwnerEchoMedianMilliseconds < options.OwnerEchoLagThresholdMs) continue;
+                    if (sample.OwnerMobsSimulated < options.OwnerEchoMinMobs) continue;
+                    if (sample.ClientAvailable && (!sample.ClientPlayerReady || sample.ClientTeleporting)) continue;
+                    if (!found || sample.OwnerEchoMedianMilliseconds > worst.OwnerEchoMedianMilliseconds)
+                    {
+                        worst = sample;
+                        found = true;
+                    }
+                }
+                if (!found) continue;
+                double ratio = worst.OwnerEchoMedianMilliseconds / Math.Max(1d, options.OwnerEchoLagThresholdMs);
+                string where = string.IsNullOrEmpty(worst.OwnerNearPlayers) ? "jogadores" : worst.OwnerNearPlayers;
+                causes.Add(new VerdictCause(
+                    "mob-owner-lag",
+                    ratio >= 2d ? VerdictConfidence.High : VerdictConfidence.Medium,
+                    ratio,
+                    peer.Name,
+                    $"indício de dono com atraso: {peer.Name} responde em {Num(worst.OwnerEchoMedianMilliseconds, 0)} ms e simula {worst.OwnerMobsSimulated} mobs perto de {where}"));
+            }
+        }
+
+        /// <summary>
+        /// Among the seconds when the server frame was bad (slow average or a severe stall), tells
+        /// a host that had no CPU to give (system busy or hypervisor steal while the game process
+        /// used little) from a game process that saturated its own core. Seconds without a host
+        /// measurement never count.
+        /// </summary>
+        private static void AddHostCpuCause(List<VerdictCause> causes, IReadOnlyList<VerdictServerSample> server, VerdictOptions options)
+        {
+            int starved = 0;
+            int saturated = 0;
+            bool stealSeen = false;
+            double starvedSystem = 0d;
+            double starvedStealPeak = 0d;
+            double starvedProcessAtPeak = -1d;
+            double saturatedProcess = 0d;
+            double saturatedSystem = -1d;
+            for (int index = 0; index < server.Count; index++)
+            {
+                VerdictServerSample sample = server[index];
+                if (!sample.Host.Measured || !sample.Health.Valid) continue;
+                bool slow = sample.Health.AverageFrameMilliseconds >= options.ServerOverloadThresholdMs ||
+                            sample.Health.MaximumFrameMilliseconds >= options.SevereFrameStallThresholdMs;
+                if (!slow) continue;
+
+                double processMs = sample.Host.ProcessCpuMsPerSecond;
+                double system = sample.Host.SystemCpuPercent;
+                double steal = sample.Host.StealPercent;
+                bool stealHigh = steal >= options.HostStealPercent;
+                bool processLow = processMs >= 0d && processMs < options.HostProcessSaturatedMsPerSecond;
+                bool systemHigh = system >= options.HostSystemCpuPercent && processLow;
+                if (stealHigh || systemHigh)
+                {
+                    starved++;
+                    stealSeen |= stealHigh;
+                    if (system > starvedSystem || steal > starvedStealPeak)
+                    {
+                        starvedProcessAtPeak = processMs;
+                    }
+                    starvedSystem = Math.Max(starvedSystem, system);
+                    starvedStealPeak = Math.Max(starvedStealPeak, steal);
+                }
+                else if (processMs >= options.HostProcessSaturatedMsPerSecond)
+                {
+                    saturated++;
+                    saturatedProcess = Math.Max(saturatedProcess, processMs);
+                    saturatedSystem = Math.Max(saturatedSystem, system);
+                }
+            }
+
+            int minimum = Math.Max(1, options.HostMinSeconds);
+            if (starved >= minimum && starved >= saturated)
+            {
+                string systemText = starvedSystem > 0d ? $"sistema a {Num(starvedSystem, 0)}%" : "sistema sem medida";
+                string stealText = starvedStealPeak > 0d ? $" e steal de {Num(starvedStealPeak, 1)}%" : string.Empty;
+                string processText = starvedProcessAtPeak >= 0d ? $"o processo usa só {Num(starvedProcessAtPeak, 0)} ms/s" : "o processo usa pouco";
+                causes.Add(new VerdictCause(
+                    "host-cpu-starved",
+                    stealSeen ? VerdictConfidence.High : VerdictConfidence.Medium,
+                    starved,
+                    string.Empty,
+                    $"indício de host sem CPU: {systemText}{stealText} enquanto {processText}, em {starved} s com o frame do servidor ruim"));
+            }
+            else if (saturated >= minimum)
+            {
+                string systemText = saturatedSystem >= 0d ? $" e o sistema a {Num(saturatedSystem, 0)}%" : string.Empty;
+                causes.Add(new VerdictCause(
+                    "game-cpu-saturated",
+                    VerdictConfidence.Medium,
+                    saturated,
+                    string.Empty,
+                    $"o processo do jogo está saturado: usa {Num(saturatedProcess, 0)} ms/s de CPU (cerca de um núcleo){systemText}, em {saturated} s com o frame do servidor ruim"));
+            }
         }
 
         private static void AddPeerCauses(List<VerdictCause> causes, VerdictPeerInput peer, VerdictOptions options)

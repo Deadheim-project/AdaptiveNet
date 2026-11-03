@@ -201,8 +201,8 @@ Assert.Equal(75, Array.IndexOf(incidentColumns, "server_owned_nonplayer_characte
     "the incident columns from 0.4 keep their positions");
 Assert.True(IncidentTelemetry.HeaderForTesting.Contains(",client_hit_upload_max_ms,server_world_save_ms,census_creatures_near,"),
     "PvP columns keep their place and the census columns come right after them");
-Assert.True(IncidentTelemetry.HeaderForTesting.EndsWith(",client_process_memory_mib,verdict"),
-    "census and protocol 3 columns come before the verdict, which is appended last");
+Assert.True(IncidentTelemetry.HeaderForTesting.EndsWith(",client_process_memory_mib,host_process_cpu_ms_s,host_system_cpu_pct,host_steal_pct,owner_echo_median_ms,owner_echo_last_ms,owner_echo_samples,owner_echo_timeouts,owner_echo_mobs_simulated,verdict"),
+    "census, protocol 3, host CPU and owner echo columns come before the verdict, which is appended last");
 string verdictRow = IncidentTelemetry.FormatForTesting(1, "pre", "wire-test", point, "server-stall [alta]: servidor travou 640 ms, 6 de 8");
 Assert.True(verdictRow.EndsWith(",\"server-stall [alta]: servidor travou 640 ms, 6 de 8\""),
     "the verdict is quoted as the last cell, commas inside included");
@@ -251,6 +251,46 @@ Assert.Equal("9", censusRow[Array.IndexOf(censusColumns, "client_ai_owned")], "c
 Assert.Equal("43.250", censusRow[Array.IndexOf(censusColumns, "client_system_cpu_pct")], "client system CPU column");
 Assert.Equal("3072", censusRow[Array.IndexOf(censusColumns, "client_process_memory_mib")], "client memory column");
 
+
+var echoPoint = new PeerTelemetryPoint(
+    DateTime.UtcNow.Ticks, 15.5d, "EchoTester", 126L, network, decision, 150 * 1024, 4, ownership, v3Snapshot, health, 50, 3, 5,
+    default, 0d, default, default, new OwnerEchoSample(true, true, 123.5d, 98d, 8, 2, 14, "Ana"));
+string[] echoRow = IncidentTelemetry.FormatForTesting(4, "pre", "wire-test", echoPoint).Split(',');
+Assert.Equal(censusColumns.Length, echoRow.Length, "an owner echo row stays aligned with the header");
+Assert.Equal("123.500", echoRow[Array.IndexOf(censusColumns, "owner_echo_median_ms")], "owner echo median column");
+Assert.Equal("98.000", echoRow[Array.IndexOf(censusColumns, "owner_echo_last_ms")], "owner echo last column");
+Assert.Equal("8", echoRow[Array.IndexOf(censusColumns, "owner_echo_samples")], "owner echo samples column");
+Assert.Equal("2", echoRow[Array.IndexOf(censusColumns, "owner_echo_timeouts")], "owner echo timeouts column");
+Assert.Equal("14", echoRow[Array.IndexOf(censusColumns, "owner_echo_mobs_simulated")], "owner echo mobs column");
+Assert.Equal("-1", incidentRow.Split(',')[Array.IndexOf(censusColumns, "owner_echo_median_ms")], "no echo reads -1 ms");
+Assert.Equal("-1", incidentRow.Split(',')[Array.IndexOf(censusColumns, "owner_echo_timeouts")], "a peer never probed reads -1 timeouts");
+var silentPoint = new PeerTelemetryPoint(
+    DateTime.UtcNow.Ticks, 16.5d, "NoMod", 127L, network, decision, 150 * 1024, 4, ownership, v3Snapshot, health, 50, 3, 5,
+    default, 0d, default, default, new OwnerEchoSample(true, false, 0d, 0d, 0, 3, 9, null));
+string[] silentRow = IncidentTelemetry.FormatForTesting(5, "pre", "wire-test", silentPoint).Split(',');
+Assert.Equal("-1", silentRow[Array.IndexOf(censusColumns, "owner_echo_median_ms")], "a peer that never answered is not measured");
+Assert.Equal("3", silentRow[Array.IndexOf(censusColumns, "owner_echo_timeouts")], "its timeouts are still counted");
+
+// Owner echo RPC: names carry the mod prefix and a version; the packet is 12 bytes, version + sequence.
+Assert.True(OwnerEchoWire.RequestRpcName.StartsWith("AdaptiveNet.") && OwnerEchoWire.RequestRpcName.EndsWith(".1"), "echo request RPC name is prefixed and versioned");
+Assert.True(OwnerEchoWire.ReplyRpcName.StartsWith("AdaptiveNet.") && OwnerEchoWire.ReplyRpcName.EndsWith(".1"), "echo reply RPC name is prefixed and versioned");
+Assert.True(OwnerEchoWire.RequestRpcName != OwnerEchoWire.ReplyRpcName, "request and reply use different RPCs");
+ZPackage echoPackage = OwnerEchoWire.Write(123456789012L);
+Assert.Equal(12, echoPackage.Size(), "an echo packet is 12 bytes");
+Assert.True(OwnerEchoWire.TryRead(new ZPackage(echoPackage.GetArray()), out long echoSequence) && echoSequence == 123456789012L, "echo packet round-trips its sequence");
+var wrongVersion = new ZPackage();
+wrongVersion.Write(2);
+wrongVersion.Write(5L);
+Assert.True(!OwnerEchoWire.TryRead(new ZPackage(wrongVersion.GetArray()), out _), "an unknown echo version is ignored");
+var truncatedEcho = new ZPackage();
+truncatedEcho.Write(1);
+Assert.True(!OwnerEchoWire.TryRead(new ZPackage(truncatedEcho.GetArray()), out _), "a truncated echo packet is ignored");
+var oversizedEcho = new ZPackage();
+oversizedEcho.Write(1);
+oversizedEcho.Write(5L);
+oversizedEcho.Write(new string('x', 64));
+Assert.True(!OwnerEchoWire.TryRead(new ZPackage(oversizedEcho.GetArray()), out _), "an oversized echo packet is ignored");
+Assert.True(!OwnerEchoWire.TryRead(null, out _), "a null echo packet is ignored");
 
 var aggregate = new DiagnosticsSnapshot
 {

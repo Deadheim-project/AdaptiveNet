@@ -168,6 +168,9 @@ namespace AdaptiveNet
         private static int _logZdoQueueRefusals;
         private static double _logWorldSaveMaximumMs;
         private static RuntimeHealthSample _logLocalHealth;
+        private static HostCpuProbe _hostCpuProbe;
+        private static HostCpuSample _hostCpu;
+        private static readonly HostCpuLogWindow HostCpuLog = new HostCpuLogWindow();
         private static double _logQueueDelayMaximumMs;
         private static double _logClientFrameMaximumMs;
         private static double _logClientReportDelayMaximumMs;
@@ -190,6 +193,7 @@ namespace AdaptiveNet
             PinnedSteamSender.Initialize(log);
             ClientTelemetryRpc.Initialize(log);
             GroupCaptureRpc.Initialize(settings, log);
+            OwnerEchoRuntime.Initialize(log);
             PvpTelemetry.Initialize(log);
             ServerOwnershipCensus.Initialize(log);
             _ownershipDisagreement.Reset();
@@ -420,6 +424,7 @@ namespace AdaptiveNet
             RecheckConflictsOnce();
             ClientTelemetryRpc.EnsureRegistered();
             GroupCaptureRpc.Tick(unscaledTime);
+            OwnerEchoRuntime.EnsureRegistered();
             if (unscaledTime < _nextSampleTime) return;
 
             _nextSampleTime = unscaledTime + Math.Max(0.25f, _settings.SampleIntervalSeconds.Value);
@@ -432,6 +437,7 @@ namespace AdaptiveNet
                 CheckOnlineBackendOnce();
                 EnsureIncidentWriter();
                 RefreshOwnershipIfDue(unscaledTime);
+                SampleHostCpu(unscaledTime);
             }
             else
             {
@@ -528,7 +534,9 @@ namespace AdaptiveNet
                         CharacterOwnershipTelemetry.ServerOwnedNonPlayerCharacters,
                         pvp.Get(peer.m_uid),
                         pvp.WorldSaveMilliseconds,
-                        ServerOwnershipCensus.Get(peer.m_uid, unscaledTime));
+                        ServerOwnershipCensus.Get(peer.m_uid, unscaledTime),
+                        _hostCpu,
+                        OwnerEchoRuntime.Get(peer.m_uid, unscaledTime));
                     CheckOwnershipAgreement(point, unscaledTime);
                     context.History.Add(point);
                     currentPoints.Add(point);
@@ -563,6 +571,7 @@ namespace AdaptiveNet
                 for (int index = 0; index < staleConnections.Length; index++)
                 {
                     ConnectionContext stale = staleConnections[index];
+                    OwnerEchoRuntime.Forget(stale.PeerUid);
                     bool wasDegraded = stale.WasCongested ||
                                        unscaledTime - stale.LastAnomalyTime <= degradedWindowSeconds;
                     if (!wasDegraded) continue;
@@ -582,7 +591,7 @@ namespace AdaptiveNet
                     zdoObjects = zdoSent = zdoReceived = zdoQueue = -1;
                 }
                 _serverHistory.Add(new VerdictServerSample(
-                    unscaledTime, intervalHealth, pvp.WorldSaveMilliseconds, zdoObjects, zdoSent, zdoReceived, zdoQueue));
+                    unscaledTime, intervalHealth, pvp.WorldSaveMilliseconds, zdoObjects, zdoSent, zdoReceived, zdoQueue, _hostCpu));
 
                 bool enteredOverload = OverloadTracker.Observe(
                     intervalHealth, verdictOptions.ServerOverloadSeconds, verdictOptions.ServerOverloadThresholdMs);
@@ -720,8 +729,10 @@ namespace AdaptiveNet
             _incidents = null;
             ClientTelemetryRpc.Shutdown();
             GroupCaptureRpc.Shutdown();
+            OwnerEchoRuntime.Shutdown();
             PvpTelemetry.Reset();
             ServerOwnershipCensus.Reset();
+            OwnerEchoRuntime.Reset();
             AdaptivePeerScheduler.Reset();
             PinnedSteamSender.Reset();
             SteamInterface.Reset();
@@ -963,7 +974,10 @@ namespace AdaptiveNet
                 client.PlayerReady,
                 client.Teleporting,
                 client.Health.MaximumFrameMilliseconds,
-                client.DeliveryDelayMilliseconds);
+                client.DeliveryDelayMilliseconds,
+                point.OwnerEcho.Measured ? point.OwnerEcho.MedianMilliseconds : -1d,
+                point.OwnerEcho.MobsSimulated,
+                point.OwnerEcho.NearPlayers);
         }
 
         /// <summary>
@@ -1014,6 +1028,9 @@ namespace AdaptiveNet
             // desliga so essa telemetria, com aviso.
             ServerOwnershipCensus.Tick(now, _settings);
             ServerOwnershipCensus.LogIfDue(now, _settings);
+            // Eco ate o dono (OwnerEchoRuntime): pacotes de 12 bytes, sem varrer ZDOs.
+            OwnerEchoRuntime.Tick(now, _settings);
+            OwnerEchoRuntime.LogIfDue(now, _settings);
         }
 
         /// <summary>
@@ -1307,6 +1324,21 @@ namespace AdaptiveNet
             return snapshot;
         }
 
+        /// <summary>One cheap sample per tick; any fault leaves the host CPU as not measured.</summary>
+        private static void SampleHostCpu(double now)
+        {
+            try
+            {
+                if (_hostCpuProbe == null) _hostCpuProbe = HostCpuProbe.CreateForThisMachine();
+                _hostCpu = _hostCpuProbe.Sample(now);
+                HostCpuLog.Add(_hostCpu);
+            }
+            catch (Exception)
+            {
+                _hostCpu = default;
+            }
+        }
+
         private static void LogAggregateIfDue(double now)
         {
             if (_settings.LogIntervalSeconds.Value <= 0f || now < _nextLogTime) return;
@@ -1324,6 +1356,7 @@ namespace AdaptiveNet
                 $"rateCapAvg={_snapshot.AverageRateLimitKiB:F0}KiB/s, zdoAvg={_snapshot.AverageZdoBudgetKiB:F1}KiB, " +
                 $"congested={_snapshot.CongestedPeers}, grouped={_snapshot.GroupedPeers}, " +
                 $"localFps={_logLocalHealth.AverageFps:F0}, localFrameMax={_logLocalHealth.MaximumFrameMilliseconds:F0}ms, " +
+                (_hostCpuProbe != null ? HostCpuLog.Format() + ", " : string.Empty) +
                 $"clientReports={_snapshot.ClientTelemetryPeers}/{_snapshot.PeerCount}, missing={_snapshot.MissingClientReports}, " +
                 $"clientFrameMax={_logClientFrameMaximumMs:F0}ms, reportDelayMax={_logClientReportDelayMaximumMs:F0}ms, " +
                 $"mobs={_snapshot.ActiveNonPlayerCharacters}, incident={_snapshot.ActiveIncidentId}, " +
@@ -1361,6 +1394,7 @@ namespace AdaptiveNet
 
         private static void ResetHealthForLog()
         {
+            HostCpuLog.Reset();
             _logLocalHealth = default;
             _logQueueDelayMaximumMs = 0d;
             _logClientFrameMaximumMs = 0d;
