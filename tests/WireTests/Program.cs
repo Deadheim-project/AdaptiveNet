@@ -46,7 +46,8 @@ package.SetPos(0);
 Assert.True(ClientTelemetryReport.TryDeserialize(package, out ClientTelemetryReport decoded, out int protocol),
     "wire report round-trips");
 Assert.Equal(ClientTelemetryReport.CurrentProtocol, protocol, "wire protocol version");
-Assert.Equal(2, ClientTelemetryReport.CurrentProtocol, "the hit-upload report is protocol 2");
+Assert.Equal(3, ClientTelemetryReport.CurrentProtocol, "the AI/machine report is protocol 3");
+Assert.True(!decoded.Ai.Measured && !decoded.Machine.Measured, "a report built without the v3 fields reads as not measured");
 Assert.Equal(42L, decoded.Sequence, "wire sequence");
 Assert.Near(310d, decoded.Health.GcCorrelatedStallMilliseconds, 0.001d, "wire GC-correlated frame");
 Assert.Equal(2048, decoded.UploadNetwork.PendingReliableBytes, "wire pending reliable bytes");
@@ -70,6 +71,58 @@ oldProtocol.Write(1L);
 oldProtocol.SetPos(0);
 Assert.True(!ClientTelemetryReport.TryDeserialize(oldProtocol, out _, out int oldVersion) && oldVersion == 1,
     "a protocol 1 report is refused and its version reported");
+
+// Protocol 3 round trip.
+var v3Source = new ClientTelemetryReport(44L, 125.5d, true, true, false, health, network, hitUpload,
+    new ClientAiSample(14, 9, 5), new ClientMachineSample(612.5d, 43.25d, 3072));
+ZPackage v3Package = v3Source.Serialize();
+Assert.True(v3Package.Size() <= 512, "the protocol 3 report still fits the 512-byte limit");
+v3Package.SetPos(0);
+Assert.True(ClientTelemetryReport.TryDeserialize(v3Package, out ClientTelemetryReport v3, out int v3Protocol),
+    "protocol 3 report round-trips");
+Assert.Equal(3, v3Protocol, "protocol 3 reported");
+Assert.True(v3.Ai.Measured && v3.Machine.Measured, "v3 fields are measured");
+Assert.Equal(14, v3.Ai.Instances, "client AI instances");
+Assert.Equal(9, v3.Ai.Owned, "client AI simulated");
+Assert.Equal(5, v3.Ai.Other, "client AI owned by others");
+Assert.Near(612.5d, v3.Machine.ProcessCpuMsPerSecond, 0.001d, "client process CPU");
+Assert.Near(43.25d, v3.Machine.SystemCpuPercent, 0.001d, "client system CPU");
+Assert.Equal(3072, v3.Machine.ProcessMemoryMiB, "client process memory");
+Assert.Near(88d, v3.HitUpload.MaximumMilliseconds, 0.001d, "v3 keeps the v2 fields");
+
+// An unmeasured v3 field set stays unmeasured on the wire.
+var v3Unmeasured = new ClientTelemetryReport(45L, 126.5d, true, true, false, health, network);
+ZPackage v3UnmeasuredPackage = v3Unmeasured.Serialize();
+v3UnmeasuredPackage.SetPos(0);
+Assert.True(ClientTelemetryReport.TryDeserialize(v3UnmeasuredPackage, out ClientTelemetryReport v3None, out _) &&
+            !v3None.Ai.Measured && !v3None.Machine.Measured, "unmeasured v3 fields stay unmeasured");
+
+// A protocol 2 report (same bytes minus the 26-byte v3 tail, version patched) still parses, unmeasured.
+byte[] v3Bytes = v3Source.Serialize().GetArray();
+byte[] v2Bytes = new byte[v3Bytes.Length - 26];
+Array.Copy(v3Bytes, v2Bytes, v2Bytes.Length);
+BitConverter.GetBytes(2).CopyTo(v2Bytes, 0);
+var v2Package = new ZPackage(v2Bytes);
+Assert.True(ClientTelemetryReport.TryDeserialize(v2Package, out ClientTelemetryReport v2, out int v2Protocol),
+    "a protocol 2 report is still accepted");
+Assert.Equal(2, v2Protocol, "protocol 2 reported");
+Assert.True(!v2.Ai.Measured && !v2.Machine.Measured, "protocol 2 reads the new fields as not measured");
+Assert.Equal(4, v2.HitUpload.Count, "protocol 2 keeps the hit upload fields");
+
+byte[] v4Bytes = (byte[])v3Bytes.Clone();
+BitConverter.GetBytes(4).CopyTo(v4Bytes, 0);
+Assert.True(!ClientTelemetryReport.TryDeserialize(new ZPackage(v4Bytes), out _, out int v4Protocol) && v4Protocol == 4,
+    "a newer protocol is refused");
+var truncatedV3 = new byte[v3Bytes.Length - 10];
+Array.Copy(v3Bytes, truncatedV3, truncatedV3.Length);
+Assert.True(!ClientTelemetryReport.TryDeserialize(new ZPackage(truncatedV3), out _, out _),
+    "a protocol 3 report cut short is refused");
+
+var v3State = new RemoteClientTelemetryState();
+Assert.True(v3State.Accept(v3Source, 300d), "v3 report accepted");
+RemoteClientTelemetrySnapshot v3Snapshot = v3State.TakeSnapshot(300.2d);
+Assert.Equal(9, v3Snapshot.Ai.Owned, "snapshot carries the client AI sample");
+Assert.Near(43.25d, v3Snapshot.Machine.SystemCpuPercent, 0.001d, "snapshot carries the client machine sample");
 
 var hitState = new RemoteClientTelemetryState();
 Assert.True(hitState.Accept(source, 223.5d), "hit report accepted");
@@ -146,8 +199,16 @@ Assert.Equal(
 string[] incidentColumns = IncidentTelemetry.HeaderForTesting.Split(',');
 Assert.Equal(75, Array.IndexOf(incidentColumns, "server_owned_nonplayer_characters"),
     "the incident columns from 0.4 keep their positions");
-Assert.True(IncidentTelemetry.HeaderForTesting.EndsWith(",client_hit_upload_max_ms,server_world_save_ms"),
-    "PvP columns are appended at the end of the incident CSV");
+Assert.True(IncidentTelemetry.HeaderForTesting.Contains(",client_hit_upload_max_ms,server_world_save_ms,census_creatures_near,"),
+    "PvP columns keep their place and the census columns come right after them");
+Assert.True(IncidentTelemetry.HeaderForTesting.EndsWith(",client_process_memory_mib"),
+    "census and protocol 3 columns are appended at the end of the incident CSV");
+{
+    string[] notMeasured = incidentRow.Split(',');
+    Assert.Equal("-1", notMeasured[Array.IndexOf(incidentColumns, "census_creatures_near")], "no census reads -1");
+    Assert.Equal("-1", notMeasured[Array.IndexOf(incidentColumns, "client_ai_owned")], "no client AI reads -1");
+    Assert.Equal("-1", notMeasured[Array.IndexOf(incidentColumns, "client_system_cpu_pct")], "no client CPU reads -1");
+}
 var pvpPoint = new PeerTelemetryPoint(
     DateTime.UtcNow.Ticks,
     13.5d,
@@ -172,6 +233,21 @@ Assert.Equal("3", pvpRow[Array.IndexOf(incidentColumns, "hit_forward_count")], "
 Assert.Equal("2", pvpRow[Array.IndexOf(incidentColumns, "zdo_queue_refusals")], "queue refusal column");
 Assert.Equal("6", pvpRow[Array.IndexOf(incidentColumns, "client_hit_upload_count")], "client hit upload count column");
 Assert.Equal("870.000", pvpRow[Array.IndexOf(incidentColumns, "server_world_save_ms")], "world save column");
+
+var censusPoint = new PeerTelemetryPoint(
+    DateTime.UtcNow.Ticks, 14.5d, "CensusTester", 125L, network, decision, 150 * 1024, 4, ownership, v3Snapshot, health, 50, 3, 5,
+    default, 0d, new PeerCensusSample(12, 7, 2, 1, 4200, 1.75d, 3.5d, false));
+string[] censusRow = IncidentTelemetry.FormatForTesting(3, "pre", "wire-test", censusPoint).Split(',');
+string[] censusColumns = IncidentTelemetry.HeaderForTesting.Split(',');
+Assert.Equal(censusColumns.Length, censusRow.Length, "a census row stays aligned with the header");
+Assert.Equal("12", censusRow[Array.IndexOf(censusColumns, "census_creatures_near")], "census creatures column");
+Assert.Equal("7", censusRow[Array.IndexOf(censusColumns, "census_owned_by_peer")], "census owned by peer column");
+Assert.Equal("2", censusRow[Array.IndexOf(censusColumns, "census_owned_by_others")], "census other players column");
+Assert.Equal("1.750", censusRow[Array.IndexOf(censusColumns, "census_scan_ms")], "census scan cost column");
+Assert.Equal("9", censusRow[Array.IndexOf(censusColumns, "client_ai_owned")], "client AI owned column");
+Assert.Equal("43.250", censusRow[Array.IndexOf(censusColumns, "client_system_cpu_pct")], "client system CPU column");
+Assert.Equal("3072", censusRow[Array.IndexOf(censusColumns, "client_process_memory_mib")], "client memory column");
+
 
 var aggregate = new DiagnosticsSnapshot
 {

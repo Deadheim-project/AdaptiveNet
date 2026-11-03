@@ -58,6 +58,13 @@ namespace AdaptiveNet
         public ConfigEntry<float> ClientReportDelayThresholdMs { get; private set; }
         public ConfigEntry<float> ClientReportMissingSeconds { get; private set; }
         public ConfigEntry<float> OwnershipSampleIntervalSeconds { get; private set; }
+        public ConfigEntry<bool> OwnerCensus { get; private set; }
+        public ConfigEntry<float> OwnerCensusPeerIntervalSeconds { get; private set; }
+        public ConfigEntry<int> OwnerCensusZoneRadius { get; private set; }
+        public ConfigEntry<float> OwnerCensusBudgetMsPerSecond { get; private set; }
+        public ConfigEntry<float> OwnerCensusMaxScanMs { get; private set; }
+        public ConfigEntry<int> OwnerCensusMaxZdosPerScan { get; private set; }
+        public ConfigEntry<int> OwnershipDisagreementMinCreatures { get; private set; }
         public ConfigEntry<int> IncidentFileMaxMiB { get; private set; }
         public ConfigEntry<int> RetainedIncidentFiles { get; private set; }
         public ConfigEntry<int> IncidentRetentionDays { get; private set; }
@@ -166,7 +173,21 @@ namespace AdaptiveNet
                 ClientReportMissingSeconds = Synced(config.Bind("Diagnostics", "ClientReportMissingSeconds", 4f,
                     new ConfigDescription("In-game time (counted from when the player's character exists) without any client report before telemetry is marked missing.", new AcceptableValueRange<float>(2f, 30f)))),
                 OwnershipSampleIntervalSeconds = Synced(config.Bind("Diagnostics", "OwnershipSampleIntervalSeconds", 5f,
-                    new ConfigDescription("Interval for counting active character/mob ownership.", new AcceptableValueRange<float>(1f, 30f)))),
+                    new ConfigDescription("Minimum seconds between the start of two ownership census cycles (one cycle scans every player once).", new AcceptableValueRange<float>(1f, 30f)))),
+                OwnerCensus = Synced(config.Bind("Diagnostics", "OwnerCensus", true,
+                    "Server only: count who owns (simulates) each creature from the ZDOs in the sectors around every player, without instantiating anything and without scanning the whole world. Feeds the ownership columns of the incident CSV.")),
+                OwnerCensusPeerIntervalSeconds = Synced(config.Bind("Diagnostics", "OwnerCensusPeerIntervalSeconds", 1f,
+                    new ConfigDescription("Minimum seconds between two single-player scans (one player is scanned per step).", new AcceptableValueRange<float>(0.25f, 30f)))),
+                OwnerCensusZoneRadius = Synced(config.Bind("Diagnostics", "OwnerCensusZoneRadius", 1,
+                    new ConfigDescription("Zones around each player to scan: 1 = 3x3 zones, 2 = 5x5. Cost grows with the square.", new AcceptableValueRange<int>(0, 3)))),
+                OwnerCensusBudgetMsPerSecond = Synced(config.Bind("Diagnostics", "OwnerCensusBudgetMsPerSecond", 1f,
+                    new ConfigDescription("Main-thread time the census may use per second; an expensive scan postpones the next one to stay inside it.", new AcceptableValueRange<float>(0.05f, 20f)))),
+                OwnerCensusMaxScanMs = Synced(config.Bind("Diagnostics", "OwnerCensusMaxScanMs", 25f,
+                    new ConfigDescription("If three scans in a row take longer than this, the census turns itself off with a warning.", new AcceptableValueRange<float>(1f, 500f)))),
+                OwnerCensusMaxZdosPerScan = Synced(config.Bind("Diagnostics", "OwnerCensusMaxZdosPerScan", 150000,
+                    new ConfigDescription("Hard cap of ZDOs visited by one scan (a scan that hits it is cut and marked truncated).", new AcceptableValueRange<int>(1000, 5000000)))),
+                OwnershipDisagreementMinCreatures = Synced(config.Bind("Diagnostics", "OwnershipDisagreementMinCreatures", 4,
+                    new ConfigDescription("Minimum difference between the creatures a client says it simulates and what the server counts for it before a (rate-limited) warning is logged.", new AcceptableValueRange<int>(1, 100)))),
                 IncidentFileMaxMiB = Synced(config.Bind("Diagnostics", "IncidentFileMaxMiB", 16,
                     new ConfigDescription("Rotate the incident CSV at this size.", new AcceptableValueRange<int>(1, 256)))),
                 RetainedIncidentFiles = Synced(config.Bind("Diagnostics", "RetainedIncidentFiles", 16,

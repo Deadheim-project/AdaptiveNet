@@ -6,9 +6,12 @@ namespace AdaptiveNet
 {
     internal readonly struct ClientTelemetryReport
     {
-        // 2 appends the client's hit-RPC upload wait. ServerSync already holds client and server
-        // to the same AdaptiveNet version, so only the current protocol is accepted.
-        public const int CurrentProtocol = 2;
+        // 2 appends the client's hit-RPC upload wait. 3 appends the AIs the client instantiated and
+        // simulates plus cheap machine fields (process/system CPU, memory). ServerSync holds client
+        // and server to the same AdaptiveNet version, so server and launcher must ship together;
+        // a protocol 2 report still parses (the new fields read as "not measured"), anything else is refused.
+        public const int CurrentProtocol = 3;
+        public const int MinimumProtocol = 2;
 
         public ClientTelemetryReport(
             long sequence,
@@ -18,7 +21,9 @@ namespace AdaptiveNet
             bool teleporting,
             RuntimeHealthSample health,
             NetworkSample uploadNetwork,
-            LatencySummary hitUpload = default)
+            LatencySummary hitUpload = default,
+            ClientAiSample ai = default,
+            ClientMachineSample machine = default)
         {
             Sequence = sequence;
             ClientMonotonicSeconds = clientMonotonicSeconds;
@@ -28,6 +33,8 @@ namespace AdaptiveNet
             Health = health;
             UploadNetwork = uploadNetwork;
             HitUpload = hitUpload;
+            Ai = ai;
+            Machine = machine;
         }
 
         public long Sequence { get; }
@@ -39,6 +46,10 @@ namespace AdaptiveNet
         public NetworkSample UploadNetwork { get; }
         /// <summary>How long the hit RPCs this client sent waited in its own send queue.</summary>
         public LatencySummary HitUpload { get; }
+        /// <summary>Protocol 3: AIs instantiated / simulated by this client. Unmeasured on protocol 2.</summary>
+        public ClientAiSample Ai { get; }
+        /// <summary>Protocol 3: local machine fields. Unmeasured on protocol 2.</summary>
+        public ClientMachineSample Machine { get; }
 
         public ZPackage Serialize()
         {
@@ -79,6 +90,14 @@ namespace AdaptiveNet
             package.Write((float)HitUpload.AverageMilliseconds);
             package.Write((float)HitUpload.P95Milliseconds);
             package.Write((float)HitUpload.MaximumMilliseconds);
+            package.Write(Ai.Measured);
+            package.Write(Ai.Instances);
+            package.Write(Ai.Owned);
+            package.Write(Ai.Other);
+            package.Write(Machine.Measured);
+            package.Write((float)Machine.ProcessCpuMsPerSecond);
+            package.Write((float)Machine.SystemCpuPercent);
+            package.Write(Machine.ProcessMemoryMiB);
             return package;
         }
 
@@ -90,7 +109,7 @@ namespace AdaptiveNet
             try
             {
                 protocol = package.ReadInt();
-                if (protocol != CurrentProtocol) return false;
+                if (protocol < MinimumProtocol || protocol > CurrentProtocol) return false;
                 long sequence = package.ReadLong();
                 double clientTime = Finite(package.ReadDouble(), 0d, 1000000000d);
                 bool focused = package.ReadBool();
@@ -143,6 +162,21 @@ namespace AdaptiveNet
                 var hitUpload = hitCount > 0
                     ? new LatencySummary(hitCount, hitAverage, hitP95, hitMaximum)
                     : default;
+                ClientAiSample ai = default;
+                ClientMachineSample machine = default;
+                if (protocol >= 3)
+                {
+                    bool aiMeasured = package.ReadBool();
+                    int aiInstances = Clamp(package.ReadInt(), 0, 1000000);
+                    int aiOwned = Clamp(package.ReadInt(), 0, 1000000);
+                    int aiOther = Clamp(package.ReadInt(), 0, 1000000);
+                    if (aiMeasured) ai = new ClientAiSample(aiInstances, aiOwned, aiOther);
+                    bool machineMeasured = package.ReadBool();
+                    double processCpu = Finite(package.ReadSingle(), -1d, 100000d);
+                    double systemCpu = Finite(package.ReadSingle(), -1d, 100d);
+                    int memoryMiB = Clamp(package.ReadInt(), 0, 1048576);
+                    if (machineMeasured) machine = new ClientMachineSample(processCpu, systemCpu, memoryMiB);
+                }
                 var network = new NetworkSample(
                     networkValid,
                     ping,
@@ -166,7 +200,9 @@ namespace AdaptiveNet
                     teleporting,
                     health,
                     network,
-                    hitUpload);
+                    hitUpload,
+                    ai,
+                    machine);
                 return sequence >= 0 && clientTime > 0d;
             }
             catch
@@ -202,7 +238,9 @@ namespace AdaptiveNet
             RuntimeHealthSample health,
             NetworkSample uploadNetwork,
             LatencySummary hitUpload = default,
-            bool everReported = false)
+            bool everReported = false,
+            ClientAiSample ai = default,
+            ClientMachineSample machine = default)
         {
             EverReported = everReported || available;
             Available = available;
@@ -217,6 +255,8 @@ namespace AdaptiveNet
             Health = health;
             UploadNetwork = uploadNetwork;
             HitUpload = hitUpload;
+            Ai = ai;
+            Machine = machine;
         }
 
         public bool Available { get; }
@@ -234,6 +274,10 @@ namespace AdaptiveNet
         public NetworkSample UploadNetwork { get; }
         /// <summary>Hit RPC upload wait over every report merged into this snapshot.</summary>
         public LatencySummary HitUpload { get; }
+        /// <summary>Latest AIs the client says it instantiated/simulates (unmeasured on protocol 2).</summary>
+        public ClientAiSample Ai { get; }
+        /// <summary>Latest local machine fields of the client (unmeasured on protocol 2).</summary>
+        public ClientMachineSample Machine { get; }
     }
 
     internal sealed class RemoteClientTelemetryState
@@ -242,6 +286,8 @@ namespace AdaptiveNet
         private RuntimeHealthSample _mergedHealth;
         private LatencySummary _mergedHitUpload;
         private NetworkSample _latestNetwork;
+        private ClientAiSample _latestAi;
+        private ClientMachineSample _latestMachine;
         private bool _focused;
         private bool _playerReady;
         private bool _teleporting;
@@ -260,6 +306,8 @@ namespace AdaptiveNet
             _lastExcessDelay = _delay.Observe(report.Sequence, report.ClientMonotonicSeconds, arrivalTime);
             _maximumExcessDelay = Math.Max(_maximumExcessDelay, _lastExcessDelay);
             _latestNetwork = report.UploadNetwork;
+            _latestAi = report.Ai;
+            _latestMachine = report.Machine;
             if (_reportsMerged == 0)
             {
                 _focused = report.Focused;
@@ -309,7 +357,9 @@ namespace AdaptiveNet
                 _mergedHealth,
                 _latestNetwork,
                 _mergedHitUpload,
-                _available);
+                _available,
+                _latestAi,
+                _latestMachine);
             _mergedHealth = default;
             _mergedHitUpload = default;
             _reportsMerged = 0;
@@ -359,7 +409,9 @@ namespace AdaptiveNet
             bool focusedThroughoutInterval,
             bool playerReadyThroughoutInterval,
             bool teleportingDuringInterval,
-            LatencySummary hitUpload)
+            LatencySummary hitUpload,
+            ClientAiSample ai = default,
+            ClientMachineSample machine = default)
         {
             if (ZRoutedRpc.instance == null || ZNet.instance == null || ZNet.instance.IsServer()) return;
             var report = new ClientTelemetryReport(
@@ -370,7 +422,9 @@ namespace AdaptiveNet
                 teleportingDuringInterval,
                 health,
                 network,
-                hitUpload);
+                hitUpload,
+                ai,
+                machine);
             try
             {
                 ZRoutedRpc.instance.InvokeRoutedRPC(TelemetryRpcName, report.Serialize());
@@ -427,7 +481,7 @@ namespace AdaptiveNet
                 int protocol = package.ReadInt();
                 long sequence = package.ReadLong();
                 double clientTime = package.ReadDouble();
-                if (protocol == ClientTelemetryReport.CurrentProtocol && sequence >= 0 &&
+                if (protocol >= ClientTelemetryReport.MinimumProtocol && protocol <= ClientTelemetryReport.CurrentProtocol && sequence >= 0 &&
                     !double.IsNaN(clientTime) && !double.IsInfinity(clientTime))
                 {
                     NetworkRuntime.ReceiveManualIncidentMarker(sender, clientTime);

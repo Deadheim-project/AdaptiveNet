@@ -130,6 +130,7 @@ namespace AdaptiveNet
         private static double _nextLogTime;
         private static double _nextClientReportTime;
         private static double _nextOwnershipSampleTime;
+        private static readonly OwnershipDisagreementTracker _ownershipDisagreement = new OwnershipDisagreementTracker();
         private static int _historyCapacity;
         private static RuntimeHealthSample _pendingLocalHealth;
         private static bool _clientFocusedThroughoutWindow;
@@ -183,7 +184,8 @@ namespace AdaptiveNet
             PinnedSteamSender.Initialize(log);
             ClientTelemetryRpc.Initialize(log);
             PvpTelemetry.Initialize(log);
-            CharacterOwnershipTelemetry.Reset();
+            ServerOwnershipCensus.Initialize(log);
+            _ownershipDisagreement.Reset();
             RuntimeHealthMonitor.Initialize(Time.realtimeSinceStartupAsDouble);
 
             _active = ComputeActive();
@@ -508,7 +510,9 @@ namespace AdaptiveNet
                         CharacterOwnershipTelemetry.UnownedNonPlayerCharacters,
                         CharacterOwnershipTelemetry.ServerOwnedNonPlayerCharacters,
                         pvp.Get(peer.m_uid),
-                        pvp.WorldSaveMilliseconds);
+                        pvp.WorldSaveMilliseconds,
+                        ServerOwnershipCensus.Get(peer.m_uid, unscaledTime));
+                    CheckOwnershipAgreement(point, unscaledTime);
                     context.History.Add(point);
                     currentPoints.Add(point);
 
@@ -675,7 +679,7 @@ namespace AdaptiveNet
             _incidents = null;
             ClientTelemetryRpc.Shutdown();
             PvpTelemetry.Reset();
-            CharacterOwnershipTelemetry.Reset();
+            ServerOwnershipCensus.Reset();
             AdaptivePeerScheduler.Reset();
             PinnedSteamSender.Reset();
             SteamInterface.Reset();
@@ -692,6 +696,8 @@ namespace AdaptiveNet
             _nextClientReportTime = now + EffectiveClientReportIntervalSeconds();
             NetworkSample network = samples.Count > 0 ? samples[0].LastSample : default;
             _lastClientHitUpload = PvpTelemetry.TakeClientHitUpload();
+            ClientAiSample clientAi = ClientSimulationProbe.Sample();
+            ClientMachineSample clientMachine = ClientMachineProbe.Sample(now);
             ClientTelemetryRpc.Send(
                 _pendingLocalHealth,
                 network,
@@ -699,7 +705,9 @@ namespace AdaptiveNet
                 _clientFocusedThroughoutWindow,
                 _clientPlayerReadyThroughoutWindow,
                 _clientTeleportingDuringWindow,
-                _lastClientHitUpload);
+                _lastClientHitUpload,
+                clientAi,
+                clientMachine);
             _pendingLocalHealth = default;
             ResetClientContextWindow();
         }
@@ -877,19 +885,31 @@ namespace AdaptiveNet
 
         private static void RefreshOwnershipIfDue(double now)
         {
-            if (_ownershipTelemetryDisabled || now < _nextOwnershipSampleTime) return;
-            _nextOwnershipSampleTime = now + Math.Max(1f, _settings.OwnershipSampleIntervalSeconds.Value);
-            try
+            // Censo por setor (ServerOwnershipCensus): uma varredura de um jogador por passo; falhou,
+            // desliga so essa telemetria, com aviso.
+            ServerOwnershipCensus.Tick(now, _settings);
+            ServerOwnershipCensus.LogIfDue(now, _settings);
+        }
+
+        /// <summary>
+        /// Cruza o que o cliente diz simular (protocolo 3) com o que o servidor conta como dono perto
+        /// dele. Aviso raro: so depois de varias discordancias seguidas, com intervalo minimo por jogador.
+        /// </summary>
+        private static void CheckOwnershipAgreement(PeerTelemetryPoint point, double now)
+        {
+            RemoteClientTelemetrySnapshot client = point.Client;
+            PeerCensusSample census = point.Census;
+            bool comparable = client.Available && client.Fresh && client.Ai.Measured && census.Measured &&
+                              !census.Truncated && census.AgeSeconds <= 30d;
+            int minimum = _settings.OwnershipDisagreementMinCreatures.Value;
+            if (_ownershipDisagreement.Observe(point.PeerUid, comparable, client.Ai.Owned, census.OwnedByPeer, minimum, now))
             {
-                CharacterOwnershipTelemetry.Refresh();
-            }
-            catch (Exception exception)
-            {
-                _ownershipTelemetryDisabled = true;
-                if (_ownershipFailureLogged) return;
-                _ownershipFailureLogged = true;
                 _log.LogWarning(
-                    $"Character ownership telemetry disabled safely: {exception.GetType().Name}: {exception.Message}");
+                    $"Ownership disagreement for {point.PlayerName} (uid {point.PeerUid}): client says it simulates " +
+                    $"{client.Ai.Owned} of {client.Ai.Instances} AIs, server counts {census.OwnedByPeer} of " +
+                    $"{census.Creatures} creatures near it ({census.OwnedByServer} server-owned, {census.Unowned} unowned, " +
+                    $"{census.OwnedByOthers} other players). Areas differ a little; a persistent gap points to " +
+                    "ownership lag or a stale census.");
             }
         }
 

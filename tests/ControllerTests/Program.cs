@@ -1,3 +1,4 @@
+using AdaptiveNet;
 using AdaptiveNet.Core;
 
 static NetworkSample Sample(
@@ -29,6 +30,103 @@ static NetworkSample Sample(
         quality: 0.99, remoteQuality: 0.50, pending: 8 * 1024));
     Test.True(remoteLoss.Congested, "remote quality degradation triggers per-peer backoff");
     Test.Equal("quality", remoteLoss.Reason, "remote quality reason");
+}
+
+// --- Censo de donos por ZDO (servidor) ---
+{
+    const long server = 1L;
+    var tally = new OwnershipTally();
+    tally.BeginCycle();
+    // Jogador A (uid 10) simula 3 criaturas, B (uid 20) simula 1, 1 sem dono, 1 do servidor.
+    // O ZDO (7,1) esta na area de A e de B: conta uma vez so.
+    Test.True(tally.Add(new ZdoKey(7, 1), 10), "primeira vez conta");
+    Test.True(!tally.Add(new ZdoKey(7, 1), 10), "o mesmo ZDO em duas areas nao conta duas vezes");
+    tally.Add(new ZdoKey(7, 2), 10);
+    tally.Add(new ZdoKey(7, 3), 10);
+    tally.Add(new ZdoKey(7, 4), 20);
+    tally.Add(new ZdoKey(7, 5), 0);
+    tally.Add(new ZdoKey(7, 6), server);
+    tally.EndCycle(server);
+    Test.Equal(6, tally.Active, "criaturas vistas no ciclo");
+    Test.Equal(1, tally.Unowned, "sem dono");
+    Test.Equal(1, tally.ServerOwned, "do servidor");
+    Test.Equal(3, tally.Get(10).OwnedNonPlayerCharacters, "agregacao por uid: A");
+    Test.Equal(1, tally.Get(20).OwnedNonPlayerCharacters, "agregacao por uid: B");
+    Test.Equal(0, tally.Get(99).OwnedNonPlayerCharacters, "uid sem criaturas");
+    Test.Equal(1, tally.Get(10).ScanId.CompareTo(0L), "ciclo numerado");
+    Test.Equal(0, tally.Get(10).TransfersSincePreviousScan, "primeiro ciclo nao tem transferencias");
+
+    // Segundo ciclo: (7,3) passa de A para B, (7,2) some, aparece (7,9) de B.
+    tally.BeginCycle();
+    tally.Add(new ZdoKey(7, 1), 10);
+    tally.Add(new ZdoKey(7, 3), 20);
+    tally.Add(new ZdoKey(7, 4), 20);
+    tally.Add(new ZdoKey(7, 9), 20);
+    tally.EndCycle(server);
+    Test.Equal(1, tally.Get(10).OwnedNonPlayerCharacters, "A depois da troca");
+    Test.Equal(3, tally.Get(20).OwnedNonPlayerCharacters, "B depois da troca");
+    Test.Equal(2, tally.Get(10).ChangeSincePreviousScan, "mudanca de contagem de A (3 -> 1)");
+    Test.Equal(2, tally.Get(20).ChangeSincePreviousScan, "mudanca de contagem de B (1 -> 3)");
+    Test.Equal(1, tally.Get(10).TransfersSincePreviousScan, "transferencia conta para quem perdeu");
+    Test.Equal(1, tally.Get(20).TransfersSincePreviousScan, "transferencia conta para quem ganhou");
+    Test.Equal(2L, tally.CyclesCompleted, "dois ciclos");
+    var top = tally.TopOwners(1);
+    Test.Equal(20L, top[0].Key, "maior dono");
+
+    tally.Reset();
+    Test.Equal(0, tally.Active, "reset zera");
+}
+
+// --- Planejador do censo: um jogador por varredura, dentro do orcamento ---
+{
+    var planner = new CensusPlanner();
+    Test.True(planner.ShouldStartCycle(0d, 5d), "primeiro ciclo comeca logo");
+    planner.StartCycle(0d, new long[] { 10, 20, 30 });
+    Test.True(!planner.ShouldStartCycle(1d, 5d), "ciclo aberto nao reinicia");
+    Test.True(planner.ScanDue(0d), "primeira varredura imediata");
+    planner.TryNext(out long first);
+    Test.Equal(10L, first, "ordem dos jogadores");
+    planner.ScanFinished(0d, 0.2d, 1d, 1d);
+    Test.True(!planner.ScanDue(0.9d), "respeita o intervalo");
+    Test.True(planner.ScanDue(1d), "intervalo cumprido");
+    planner.TryNext(out long second);
+    planner.ScanFinished(1d, 4d, 1d, 1d);
+    Test.True(!planner.ScanDue(4.9d), "varredura de 4 ms com orcamento 1 ms/s espera 4 s");
+    Test.True(planner.ScanDue(5d), "orcamento cumprido");
+    planner.TryNext(out long third);
+    Test.Equal(30L, third, "terceiro jogador");
+    Test.True(!planner.CycleOpen, "ciclo fechado");
+    Test.True(!planner.ShouldStartCycle(3d, 5d), "novo ciclo respeita o espacamento minimo");
+    Test.True(planner.ShouldStartCycle(5d, 5d), "novo ciclo depois do espacamento");
+}
+
+// --- Cruzamento cliente x servidor ---
+{
+    Test.True(!OwnershipDisagreementTracker.Disagree(10, 9, 4, 0.5d), "10 x 9 concordam");
+    Test.True(!OwnershipDisagreementTracker.Disagree(3, 0, 4, 0.5d), "diferenca pequena nao conta");
+    Test.True(OwnershipDisagreementTracker.Disagree(12, 2, 4, 0.5d), "12 x 2 discordam");
+    var tracker = new OwnershipDisagreementTracker();
+    Test.True(!tracker.Observe(5, true, 12, 2, 4, 0d), "1a discordancia: sem aviso");
+    Test.True(!tracker.Observe(5, true, 12, 2, 4, 1d), "2a discordancia: sem aviso");
+    Test.True(tracker.Observe(5, true, 12, 2, 4, 2d), "3a seguida avisa");
+    Test.True(!tracker.Observe(5, true, 12, 2, 4, 3d), "aviso limitado por frequencia");
+    Test.True(tracker.Observe(5, true, 12, 2, 4, 130d), "avisa de novo depois do intervalo");
+    Test.True(!tracker.Observe(6, true, 12, 2, 4, 0d) && !tracker.Observe(6, false, 12, 2, 4, 1d) &&
+              !tracker.Observe(6, true, 12, 2, 4, 2d) && !tracker.Observe(6, true, 12, 2, 4, 3d),
+        "dado nao comparavel zera a sequencia");
+}
+
+// --- Contas de CPU do cliente ---
+{
+    Test.Near(250d, CpuUsageMath.ProcessMsPerSecond(500d, 2d), 0.001d, "CPU do processo em ms/s");
+    Test.Near(-1d, CpuUsageMath.ProcessMsPerSecond(500d, 0d), 0.001d, "sem intervalo = nao medido");
+    Test.Near(25d, CpuUsageMath.SystemPercent(750UL, 600UL, 400UL), 0.001d, "uso do sistema: (K+U-idle)/(K+U)");
+    Test.Near(-1d, CpuUsageMath.SystemPercent(0UL, 0UL, 0UL), 0.001d, "sem delta = nao medido");
+    var machine = new ClientMachineSample(-5d, 140d, 2048);
+    Test.Near(-1d, machine.ProcessCpuMsPerSecond, 0.001d, "CPU negativa vira nao medido");
+    Test.Near(100d, machine.SystemCpuPercent, 0.001d, "CPU do sistema limitada a 100");
+    var ai = new ClientAiSample(10, 14, 0);
+    Test.Equal(10, ai.Owned, "IAs simuladas nunca passam das instanciadas");
 }
 
 AdaptiveControllerOptions StandardOptions()
