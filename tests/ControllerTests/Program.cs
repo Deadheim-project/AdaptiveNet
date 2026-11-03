@@ -816,6 +816,137 @@ static VerdictCause? Find(IReadOnlyList<VerdictCause> causes, string code, strin
     Test.Equal(0, IncidentVerdict.Evaluate(null, null, null).Count, "entradas nulas nao quebram");
 }
 
+// ---- Eco ao dono: mediana, timeout, "nao medido", escolha e regra mob-owner-lag ----
+{
+    var tracker = new OwnerEchoTracker(window: 4, timeoutSeconds: 2d, staleSeconds: 20d);
+    Test.True(!tracker.Get(7L, 0d).Tracked, "peer nunca sondado nao tem amostra");
+    Test.Equal(-1, tracker.Get(7L, 0d).Samples, "peer nunca sondado reporta -1 amostras");
+
+    // Voltas de 40, 60, 500, 80 ms: a mediana ignora o pico isolado.
+    double[] rounds = { 0.040, 0.060, 0.500, 0.080 };
+    double clock = 0d;
+    foreach (double round in rounds)
+    {
+        Test.True(tracker.IsDue(7L, clock, 4d), "peer na vez de receber eco");
+        long seq = tracker.BeginSend(7L, clock);
+        Test.True(!tracker.IsDue(7L, clock + 10d, 4d), "com eco pendente nao envia outro");
+        Test.True(tracker.Reply(7L, seq, clock + round, out double ms), "resposta da pendente e aceita");
+        Test.Near(round * 1000d, ms, 0.001, "volta em ms");
+        clock += 4d;
+    }
+    OwnerEchoSample sample = tracker.Get(7L, clock);
+    Test.True(sample.Measured, "peer que respondeu esta medido");
+    Test.Near(70d, sample.MedianMilliseconds, 0.001, "mediana de 40,60,80,500 = 70 ms");
+    Test.Near(80d, sample.LastMilliseconds, 0.001, "ultima volta");
+    Test.Equal(4, sample.Samples, "amostras na janela");
+
+    // A janela descarta a mais antiga.
+    long s5 = tracker.BeginSend(7L, clock);
+    tracker.Reply(7L, s5, clock + 0.100, out _);
+    Test.Equal(4, tracker.Get(7L, clock + 1d).Samples, "janela de 4 mantem 4 amostras");
+    Test.Near(90d, tracker.Get(7L, clock + 1d).MedianMilliseconds, 0.001, "mediana de 60,80,100,500 = 90 ms");
+
+    // Resposta duplicada ou de peer nao sondado nao conta.
+    Test.True(!tracker.Reply(7L, s5, clock + 0.2, out _), "resposta duplicada e ignorada");
+    Test.True(!tracker.Reply(99L, s5, clock + 0.2, out _), "resposta de quem nao foi sondado e ignorada");
+
+    // Resposta velha demais deixa de contar como medida.
+    Test.True(!tracker.Get(7L, clock + 60d).Measured, "ultima resposta velha = nao medido");
+}
+{
+    // Timeout: peer que ja respondeu passa a valer o timeout; peer que nunca respondeu continua nao medido.
+    var tracker = new OwnerEchoTracker(window: 4, timeoutSeconds: 2d);
+    long a = tracker.BeginSend(1L, 0d);
+    tracker.Reply(1L, a, 0.050, out _);
+    long late = tracker.BeginSend(1L, 4d);
+    Test.Equal(0, tracker.Expire(5.9d), "antes do timeout nada expira");
+    Test.Equal(1, tracker.Expire(6.1d), "depois de 2 s o pendente expira");
+    OwnerEchoSample after = tracker.Get(1L, 6.1d);
+    Test.Equal(1, after.Timeouts, "timeout contado");
+    Test.True(after.Measured, "quem ja respondeu continua medido");
+    Test.Near(1025d, after.MedianMilliseconds, 0.001, "mediana de 50 ms e do timeout de 2000 ms");
+    Test.True(!tracker.Reply(1L, late, 6.5d, out _), "resposta depois do timeout e ignorada");
+
+    long ghost = 0;
+    for (int attempt = 0; attempt < OwnerEchoTracker.SilentTimeoutsBeforeBackoff; attempt++)
+    {
+        double at = attempt * 4d;
+        Test.True(tracker.IsDue(2L, at, 4d), "peer silencioso e sondado no inicio");
+        ghost = tracker.BeginSend(2L, at);
+        tracker.Expire(at + 2.5d);
+    }
+    OwnerEchoSample silent = tracker.Get(2L, 13d);
+    Test.True(silent.Tracked && !silent.Measured, "peer sem o mod fica sondado mas nao medido");
+    Test.Near(-1d, silent.MedianMilliseconds, 0.0001, "nao medido = -1 ms");
+    Test.Equal(3, silent.Timeouts, "timeouts do peer silencioso contados");
+    Test.True(ghost > 0 && !tracker.IsDue(2L, 20d, 4d), "peer silencioso recua para uma tentativa por minuto");
+    Test.True(tracker.IsDue(2L, 80d, 4d), "e tenta de novo depois do recuo");
+    tracker.Forget(2L);
+    Test.True(!tracker.Get(2L, 80d).Tracked, "Forget remove o peer");
+}
+{
+    var tracker = new OwnerEchoTracker();
+    var owners = new List<KeyValuePair<long, int>>
+    {
+        new KeyValuePair<long, int>(0L, 50),   // sem dono
+        new KeyValuePair<long, int>(10L, 3),
+        new KeyValuePair<long, int>(11L, 40),
+        new KeyValuePair<long, int>(12L, 20),
+        new KeyValuePair<long, int>(13L, 15),
+        new KeyValuePair<long, int>(14L, 9),
+        new KeyValuePair<long, int>(99L, 80),  // servidor / desconectado
+    };
+    List<long> picked = OwnerEchoPlanner.Select(owners, uid => uid != 99L, tracker, 0d, 4d, 4);
+    Test.Equal(4, picked.Count, "escolhe no maximo 4 donos");
+    Test.Equal(11L, picked[0], "o que mais simula vem primeiro");
+    Test.True(!picked.Contains(0L) && !picked.Contains(99L), "sem dono e nao conectado ficam de fora");
+    Test.True(!picked.Contains(10L), "o 5o colocado nao entra");
+    tracker.BeginSend(11L, 0d);
+    List<long> next = OwnerEchoPlanner.Select(owners, uid => uid != 99L, tracker, 1d, 4d, 4);
+    Test.True(!next.Contains(11L), "peer com eco pendente nao recebe outro");
+    Test.Equal(0, OwnerEchoPlanner.Select(owners, uid => true, tracker, 1d, 4d, 0).Count, "maximo 0 nao escolhe ninguem");
+}
+{
+    var near = new OwnerNearMap();
+    near.Record(5L, 100L, 7, 10d);
+    near.Record(5L, 101L, 2, 10d);
+    near.Record(5L, 100L, 9, 12d);
+    List<KeyValuePair<long, int>> list = near.Get(5L, 15d, 30d, out int total);
+    Test.Equal(11, total, "total de mobs perto de jogadores (ultima varredura de cada um)");
+    Test.Equal(100L, list[0].Key, "jogador com mais mobs do dono vem primeiro");
+    near.Get(5L, 100d, 30d, out int stale);
+    Test.Equal(0, stale, "entradas velhas somem");
+    near.Forget(100L);
+    near.Get(5L, 15d, 30d, out int afterForget);
+    Test.Equal(2, afterForget, "Forget do jogador tira os mobs perto dele");
+}
+{
+    var options = new VerdictOptions();
+    Test.Near(200d, options.OwnerEchoLagThresholdMs, 0.001, "limiar padrao do eco = 200 ms");
+    VerdictPeerSample Second(double t, double echo, int mobs, bool ready = true) =>
+        new VerdictPeerSample(t, 50, 0.99, 0.99, 0, 0, 0, 150 * 1024, 20 * 1024, false, true, true, ready, false, 30, 0,
+            echo, mobs, "Ana, Bia");
+    bool HasLag(VerdictPeerInput peer) =>
+        IncidentVerdict.Evaluate(new[] { peer }, new List<VerdictServerSample>(), options).Exists(c => c.Code == "mob-owner-lag");
+
+    var slow = PeerOf("Dede", 1L, false, 6, t => Second(t, 320, 14));
+    var victim = PeerOf("Ana", 2L, true, 6, t => PeerSecond(t));
+    var found = IncidentVerdict.Evaluate(new[] { victim, slow }, new List<VerdictServerSample>(), options);
+    VerdictCause? cause = found.Find(c => c.Code == "mob-owner-lag");
+    Test.True(cause != null, "dono com eco lento e mobs perto de jogadores vira causa");
+    Test.Equal("Dede", cause!.Player, "a causa e sobre o dono, nao sobre a vitima");
+    Test.True(cause.Sentence.StartsWith("indício de dono com atraso: Dede responde em 320 ms e simula 14 mobs perto de Ana, Bia"), "frase da causa");
+    Test.True(cause.Confidence == VerdictConfidence.Medium, "1,6x o limiar = confianca media");
+
+    Test.True(IncidentVerdict.Evaluate(new[] { PeerOf("Dede", 1L, false, 6, t => Second(t, 900, 14)) }, null, options)
+        .Find(c => c.Code == "mob-owner-lag")!.Confidence == VerdictConfidence.High, "4,5x o limiar = confianca alta");
+    Test.True(!HasLag(PeerOf("Dede", 1L, false, 6, t => Second(t, 150, 14))), "abaixo do limiar nao vira causa");
+    Test.True(!HasLag(PeerOf("Dede", 1L, false, 6, t => Second(t, 900, 1))), "dono com poucos mobs nao vira causa");
+    Test.True(!HasLag(PeerOf("Dede", 1L, false, 6, t => Second(t, -1, 14))), "eco nao medido (-1, peer sem o mod) nunca vira culpado");
+    Test.True(!HasLag(PeerOf("Dede", 1L, false, 6, t => Second(t, 900, 14, ready: false))), "cliente carregando o mundo nao e dono com atraso");
+    Test.True(!HasLag(PeerOf("Antigo", 3L, false, 6, t => PeerSecond(t))), "amostra sem campos do eco (padrao) nao dispara a regra");
+}
+
 Test.Summary();
 
 static class Test

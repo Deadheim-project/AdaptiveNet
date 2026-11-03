@@ -13,5 +13,6 @@
     <Compile Include="..\..\src\DiagnosticModels.cs" Link="DiagnosticModels.cs" />
     <Compile Include="..\..\src\CharacterOwnershipTelemetry.cs" Link="CharacterOwnershipTelemetry.cs" />
     <Compile Include="..\..\src\OwnershipCensusCore.cs" Link="OwnershipCensusCore.cs" />
+    <Compile Include="..\..\src\OwnerEchoCore.cs" Link="OwnerEchoCore.cs" />
   </ItemGroup>
 </Project>
