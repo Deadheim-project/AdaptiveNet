@@ -547,4 +547,65 @@ namespace AdaptiveNet.Core
             return affected >= needed;
         }
     }
+
+    internal readonly struct LinkQualityStats
+    {
+        public LinkQualityStats(int pingPairs, double jitterMilliseconds, bool qualityMeasured, double minimumQuality)
+        {
+            PingPairs = pingPairs;
+            JitterMilliseconds = jitterMilliseconds;
+            QualityMeasured = qualityMeasured;
+            MinimumQuality = minimumQuality;
+        }
+
+        /// <summary>Consecutive-second ping pairs where both pings were measured.</summary>
+        public int PingPairs { get; }
+        /// <summary>Mean absolute change of the ping from one second to the next.</summary>
+        public double JitterMilliseconds { get; }
+        public bool QualityMeasured { get; }
+        /// <summary>Lowest measured connection quality (0-1) in the window; 1 when none was measured.</summary>
+        public double MinimumQuality { get; }
+        /// <summary>1 - lowest quality: the loss Steam's quality figure lets us infer, not a measured loss.</summary>
+        public double ApproximateLoss => QualityMeasured ? Math.Max(0d, 1d - MinimumQuality) : 0d;
+    }
+
+    /// <summary>Jitter and approximate loss from a player's per-second history, on the server alone.</summary>
+    internal static class LinkQuality
+    {
+        /// <remarks>A ping of 0 and a quality of 0 mean "not measured" (the link could not be
+        /// sampled that second), never a perfect ping or a dead link, so they are skipped.</remarks>
+        public static LinkQualityStats Compute(IReadOnlyList<VerdictPeerSample> samples)
+        {
+            int pairs = 0;
+            double jitterSum = 0d;
+            bool qualityMeasured = false;
+            double minimumQuality = 1d;
+            for (int index = 0; index < samples.Count; index++)
+            {
+                VerdictPeerSample current = samples[index];
+                if (current.LocalQuality > 0d)
+                {
+                    qualityMeasured = true;
+                    minimumQuality = Math.Min(minimumQuality, current.LocalQuality);
+                }
+                if (current.RemoteQuality > 0d)
+                {
+                    qualityMeasured = true;
+                    minimumQuality = Math.Min(minimumQuality, current.RemoteQuality);
+                }
+                if (index == 0 || current.PingMilliseconds <= 0 || samples[index - 1].PingMilliseconds <= 0) continue;
+                pairs++;
+                jitterSum += Math.Abs(current.PingMilliseconds - samples[index - 1].PingMilliseconds);
+            }
+            return new LinkQualityStats(pairs, pairs > 0 ? jitterSum / pairs : 0d, qualityMeasured, minimumQuality);
+        }
+
+        public static bool IsBad(LinkQualityStats stats, VerdictOptions options, out bool jitterHigh, out bool lossHigh)
+        {
+            jitterHigh = stats.PingPairs >= options.QualityMinPingPairs &&
+                         stats.JitterMilliseconds >= options.JitterThresholdMs;
+            lossHigh = stats.QualityMeasured && stats.ApproximateLoss >= options.LossThreshold;
+            return jitterHigh || lossHigh;
+        }
+    }
 }

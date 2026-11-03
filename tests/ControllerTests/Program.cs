@@ -322,6 +322,177 @@ AdaptiveControllerOptions StandardOptions()
     Test.Equal(1, interval.StallFrames, "the stalled frame is counted once");
 }
 
+// ---- Veredito por causa: ajudantes de teste ----
+static RuntimeHealthSample Health(double avgMs = 33, double maxMs = 40, int frames = 30)
+{
+    return new RuntimeHealthSample(1, frames, avgMs, avgMs, maxMs, 0, 0, 0, 0, 0, 0, 0);
+}
+
+static VerdictPeerSample PeerSecond(
+    double t,
+    int ping = 50,
+    double local = 0.99,
+    double remote = 0.99,
+    int pending = 0,
+    int unacked = 0,
+    double queueDelay = 0,
+    int rate = 150 * 1024,
+    double outBps = 20 * 1024,
+    bool congested = false,
+    bool clientAvailable = true,
+    bool focused = true,
+    bool ready = true,
+    bool teleporting = false,
+    double clientFrameMax = 30,
+    double delay = 0)
+{
+    return new VerdictPeerSample(t, ping, local, remote, pending, unacked, queueDelay, rate, outBps,
+        congested, clientAvailable, focused, ready, teleporting, clientFrameMax, delay);
+}
+
+static VerdictPeerInput PeerOf(string name, long uid, bool triggered, int seconds, Func<int, VerdictPeerSample> make)
+{
+    var list = new List<VerdictPeerSample>();
+    for (int t = 0; t < seconds; t++) list.Add(make(t));
+    return new VerdictPeerInput(name, uid, triggered, list);
+}
+
+static List<VerdictServerSample> ServerOf(int seconds, Func<int, VerdictServerSample> make)
+{
+    var list = new List<VerdictServerSample>();
+    for (int t = 0; t < seconds; t++) list.Add(make(t));
+    return list;
+}
+
+
+// ---- Regra 1: server-overloaded (media de frame sustentada, sem depender de pico) ----
+{
+    var options = new VerdictOptions();
+    double threshold = options.ServerOverloadThresholdMs;
+    Test.Near(75d, threshold, 0.001, "limiar de servidor sobrecarregado = 1,5x o alvo de 50 ms");
+
+    var slow = new List<double>();
+    for (int i = 0; i < 10; i++) slow.Add(90d);
+    Test.True(ServerLoad.IsSustained(slow, 10, threshold), "90 ms de media por 10 s e servidor sobrecarregado");
+
+    var capped = new List<double>();
+    for (int i = 0; i < 30; i++) capped.Add(33.4);
+    Test.True(!ServerLoad.IsSustained(capped, 10, threshold), "~30 FPS do batchmode (33 ms) nao e sobrecarga");
+
+    var worse = new List<double>();
+    for (int i = 0; i < 10; i++) worse.Add(45d);
+    Test.True(!ServerLoad.IsSustained(worse, 10, threshold), "22 FPS (45 ms) ainda abaixo de 1,5x o alvo");
+
+    var spike = new List<double>();
+    for (int i = 0; i < 10; i++) spike.Add(i == 4 ? 400d : 33d);
+    Test.True(!ServerLoad.IsSustained(spike, 10, threshold), "um unico pico nao sustenta a janela (mediana)");
+
+    var shortWindow = new List<double> { 90d, 90d, 90d };
+    Test.True(!ServerLoad.IsSustained(shortWindow, 10, threshold), "menos amostras que a janela nao conclui");
+
+    var tracker = new ServerOverloadTracker();
+    bool entered = false;
+    int enteredCount = 0;
+    for (int i = 0; i < 25; i++)
+    {
+        entered = tracker.Observe(Health(avgMs: 90, maxMs: 120), 10, threshold);
+        if (entered) enteredCount++;
+    }
+    Test.Equal(1, enteredCount, "entrar em sobrecarga avisa uma vez por episodio");
+    Test.True(tracker.Overloaded, "tracker segue sobrecarregado");
+    for (int i = 0; i < 12; i++) tracker.Observe(Health(avgMs: 33), 10, threshold);
+    Test.True(!tracker.Overloaded, "tracker se recupera quando o frame volta a 33 ms");
+    bool again = false;
+    for (int i = 0; i < 10; i++) again |= tracker.Observe(Health(avgMs: 90), 10, threshold);
+    Test.True(again, "novo episodio avisa de novo");
+
+    var emptyTracker = new ServerOverloadTracker();
+    for (int i = 0; i < 20; i++) emptyTracker.Observe(default, 10, threshold);
+    Test.True(!emptyTracker.Overloaded, "intervalo sem frames nao conta como media");
+
+    Test.Equal("server-overloaded", DiagnosticAnomalyClassifier.ClassifyServer(
+        Health(avgMs: 90, maxMs: 120), 250, 500, 0, true), "rotulo server-overloaded");
+    Test.Equal("server-frame-stall", DiagnosticAnomalyClassifier.ClassifyServer(
+        Health(avgMs: 90, maxMs: 700), 250, 500, 0, true), "pico mantem o proprio nome");
+    Test.Equal("server-world-save", DiagnosticAnomalyClassifier.ClassifyServer(
+        Health(avgMs: 90, maxMs: 120), 250, 500, 400, true), "save mantem o proprio nome");
+    Test.Equal(string.Empty, DiagnosticAnomalyClassifier.ClassifyServer(
+        Health(avgMs: 33), 250, 500, 0, false), "sem sobrecarga nem pico, nada");
+}
+
+// ---- Correlacao entre jogadores no mesmo segundo ----
+{
+    var options = new VerdictOptions();
+    var peers = new List<VerdictPeerInput>();
+    for (int p = 0; p < 8; p++)
+    {
+        int index = p;
+        peers.Add(PeerOf("P" + p, 100 + p, p == 0, 20, t => PeerSecond(t, congested: t == 10 && index < 6)));
+    }
+    PeerCorrelation.Count(peers, 10, options, out int affected, out int total);
+    Test.Equal(6, affected, "6 de 8 jogadores afetados no segundo 10");
+    Test.Equal(8, total, "8 jogadores com amostra no segundo 10");
+    Test.True(PeerCorrelation.IsCorrelated(affected, total, options), "6 de 8 e correlacao");
+
+    PeerCorrelation.Count(peers, 5, options, out int calm, out _);
+    Test.Equal(0, calm, "segundo calmo sem afetados");
+    Test.True(!PeerCorrelation.IsCorrelated(1, 8, options), "1 de 8 nao e correlacao");
+    Test.True(!PeerCorrelation.IsCorrelated(2, 8, options), "2 de 8 abaixo da metade nao e correlacao");
+    Test.True(PeerCorrelation.IsCorrelated(2, 3, options), "2 de 3 e correlacao");
+    Test.True(!PeerCorrelation.IsCorrelated(1, 1, options), "um jogador so nao correlaciona");
+
+    Test.True(PeerCorrelation.IsAffected(PeerSecond(0, clientFrameMax: 800), options), "travada de 800 ms do cliente em jogo afeta");
+    Test.True(!PeerCorrelation.IsAffected(PeerSecond(0, clientFrameMax: 800, focused: false), options), "janela sem foco nao conta");
+    Test.True(!PeerCorrelation.IsAffected(PeerSecond(0, clientFrameMax: 800, teleporting: true), options), "teleporte nao conta");
+}
+
+// ---- Regra 2: jitter e perda aproximada a partir do History ----
+{
+    var options = new VerdictOptions();
+    var steady = new List<VerdictPeerSample>();
+    for (int t = 0; t < 30; t++) steady.Add(PeerSecond(t, ping: 50 + (t % 2)));
+    LinkQualityStats calm = LinkQuality.Compute(steady);
+    Test.Near(1d, calm.JitterMilliseconds, 0.001, "jitter de ping alternando 1 ms");
+    Test.Near(0.01, calm.ApproximateLoss, 0.0001, "perda aprox. de qualidade 0,99");
+    Test.True(!LinkQuality.IsBad(calm, options, out _, out _), "link calmo nao e ruim");
+
+    var jittery = new List<VerdictPeerSample>();
+    for (int t = 0; t < 30; t++) jittery.Add(PeerSecond(t, ping: t % 2 == 0 ? 40 : 120));
+    LinkQualityStats shaky = LinkQuality.Compute(jittery);
+    Test.Near(80d, shaky.JitterMilliseconds, 0.001, "jitter medio de 80 ms");
+    Test.True(LinkQuality.IsBad(shaky, options, out bool jitterHigh, out bool lossHigh) && jitterHigh && !lossHigh,
+        "jitter alto sozinho e conexao ruim");
+
+    var lossy = new List<VerdictPeerSample>();
+    for (int t = 0; t < 30; t++) lossy.Add(PeerSecond(t, local: t == 12 ? 0.71 : 0.99, remote: 0.95));
+    LinkQualityStats lost = LinkQuality.Compute(lossy);
+    Test.Near(0.29, lost.ApproximateLoss, 0.0001, "perda aprox. = 1 - menor qualidade");
+    Test.True(LinkQuality.IsBad(lost, options, out jitterHigh, out lossHigh) && lossHigh && !jitterHigh,
+        "perda alta sozinha e conexao ruim");
+
+    // 0 = nao medido: nem ping nem qualidade zerados entram na conta.
+    var unmeasured = new List<VerdictPeerSample>();
+    for (int t = 0; t < 30; t++)
+    {
+        bool blind = t % 3 == 0;
+        unmeasured.Add(PeerSecond(t, ping: blind ? 0 : 50, local: blind ? 0 : 0.99, remote: blind ? 0 : 0.99));
+    }
+    LinkQualityStats blindStats = LinkQuality.Compute(unmeasured);
+    Test.Near(0d, blindStats.JitterMilliseconds, 0.001, "ping 0 nao vira jitter de 50 ms");
+    Test.Near(0.01, blindStats.ApproximateLoss, 0.0001, "qualidade 0 nao vira perda de 100%");
+    Test.True(!LinkQuality.IsBad(blindStats, options, out _, out _), "links nao medidos nao acusam nada");
+
+    var neverMeasured = new List<VerdictPeerSample>();
+    for (int t = 0; t < 30; t++) neverMeasured.Add(PeerSecond(t, ping: 0, local: 0, remote: 0));
+    LinkQualityStats none = LinkQuality.Compute(neverMeasured);
+    Test.True(!none.QualityMeasured, "qualidade nunca medida");
+    Test.Near(0d, none.ApproximateLoss, 0.0001, "sem medida, perda 0");
+    Test.True(!LinkQuality.IsBad(none, options, out _, out _), "sem medida nao ha veredito");
+
+    var fewPairs = new List<VerdictPeerSample> { PeerSecond(0, ping: 10), PeerSecond(1, ping: 300), PeerSecond(2, ping: 10) };
+    Test.True(!LinkQuality.IsBad(LinkQuality.Compute(fewPairs), options, out _, out _), "poucos pares de ping nao bastam");
+}
+
 Test.Summary();
 
 static class Test
