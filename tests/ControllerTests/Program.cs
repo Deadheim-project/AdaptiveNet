@@ -533,6 +533,53 @@ static List<VerdictServerSample> ServerOf(int seconds, Func<int, VerdictServerSa
     Test.True(!LinkSaturation.Analyze(new List<VerdictPeerSample>(), options).Saturated, "sem amostras, sem veredito");
 }
 
+// ---- Regra 4: rotulos informativos de carregamento e teleporte ----
+{
+    Test.Equal("client-loading", DiagnosticAnomalyClassifier.ClassifyPeerContext(true, false, false), "cliente nao pronto = carregando");
+    Test.Equal("client-teleporting", DiagnosticAnomalyClassifier.ClassifyPeerContext(true, true, true), "cliente pronto e teleportando");
+    Test.Equal(string.Empty, DiagnosticAnomalyClassifier.ClassifyPeerContext(true, true, false), "cliente em jogo: sem rotulo");
+    Test.Equal(string.Empty, DiagnosticAnomalyClassifier.ClassifyPeerContext(false, false, false), "sem relatorio nao se afirma carregamento");
+    // O gatilho continua mudo: o rotulo informativo nao muda o que abre captura.
+    Test.Equal(string.Empty, DiagnosticAnomalyClassifier.ClassifyPeer(
+        false, string.Empty, true, true, false, false, 4000, Health(maxMs: 3000), 250, 500, 500), "carregando continua sem gatilho");
+}
+
+// ---- Regra 5: churn de ZDOs contra a mediana de 60 s ----
+{
+    var options = new VerdictOptions();
+    var series = new List<double>();
+    for (int t = 0; t < 60; t++) series.Add(1200d + (t % 5) * 20);
+    series.Add(5000d);
+    ChurnResult spike = ZdoChurn.EvaluateAt(series, series.Count - 1, options);
+    Test.True(spike.Triggered, "5000 ZDOs/s contra mediana ~1240 aciona (>= 3x e acima do piso)");
+    Test.True(spike.Ratio > 3.5 && spike.Ratio < 4.5, "razao ~4x");
+    Test.Near(1240d, spike.Median, 30d, "mediana da janela");
+
+    var belowFactor = new List<double>();
+    for (int t = 0; t < 60; t++) belowFactor.Add(1200d);
+    belowFactor.Add(3000d);
+    Test.True(!ZdoChurn.EvaluateAt(belowFactor, belowFactor.Count - 1, options).Triggered, "2,5x nao aciona");
+
+    var belowFloor = new List<double>();
+    for (int t = 0; t < 60; t++) belowFloor.Add(100d);
+    belowFloor.Add(900d);
+    Test.True(!ZdoChurn.EvaluateAt(belowFloor, belowFloor.Count - 1, options).Triggered, "9x mas abaixo do piso de 2000 nao aciona");
+
+    var young = new List<double> { 100d, 100d, 100d, 9000d };
+    Test.True(!ZdoChurn.EvaluateAt(young, 3, options).Triggered, "sem baseline suficiente nao conclui");
+
+    var unreadable = new List<double>();
+    for (int t = 0; t < 60; t++) unreadable.Add(1200d);
+    unreadable.Add(-1d);
+    Test.True(!ZdoChurn.EvaluateAt(unreadable, unreadable.Count - 1, options).Triggered, "contador ilegivel (-1) e ignorado");
+
+    var inMiddle = new List<double>();
+    for (int t = 0; t < 40; t++) inMiddle.Add(t == 25 ? 8000d : 1000d);
+    ChurnResult peak = ZdoChurn.Peak(inMiddle, options);
+    Test.True(peak.Triggered && peak.Current == 8000d, "Peak acha o segundo do salto no meio da serie");
+    Test.True(!ZdoChurn.Peak(belowFactor.GetRange(0, 60), options).Triggered, "serie estavel nao tem pico");
+}
+
 Test.Summary();
 
 static class Test

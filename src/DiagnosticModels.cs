@@ -261,6 +261,18 @@ namespace AdaptiveNet.Core
             return result;
         }
 
+        /// <summary>
+        /// The reason a client is quiet, as a label that enters the verdict but never opens a
+        /// capture. <see cref="ClassifyPeer"/> silences a loading or teleporting client (its main
+        /// thread is blocked); this names that silence so an incident does not just lose it.
+        /// </summary>
+        public static string ClassifyPeerContext(bool clientReportAvailable, bool clientPlayerReady, bool clientTeleporting)
+        {
+            if (!clientReportAvailable) return string.Empty;
+            if (!clientPlayerReady) return "client-loading";
+            return clientTeleporting ? "client-teleporting" : string.Empty;
+        }
+
         public static string ClassifyServer(
             RuntimeHealthSample serverHealth,
             double frameStallThresholdMilliseconds,
@@ -687,6 +699,64 @@ namespace AdaptiveNet.Core
                 }
             }
             return default;
+        }
+    }
+
+    internal readonly struct ChurnResult
+    {
+        public ChurnResult(bool triggered, double current, double median, double ratio)
+        {
+            Triggered = triggered;
+            Current = current;
+            Median = median;
+            Ratio = ratio;
+        }
+
+        public bool Triggered { get; }
+        public double Current { get; }
+        public double Median { get; }
+        public double Ratio { get; }
+    }
+
+    /// <summary>
+    /// ZDO traffic of the second against the median of the previous minute. The counters come
+    /// from ZDOMan (sent and received last second); nothing here walks the ZDOs themselves.
+    /// A negative value means the counter could not be read and is skipped.
+    /// </summary>
+    internal static class ZdoChurn
+    {
+        /// <summary>Evaluates the value at <paramref name="index"/> against the median of the up to
+        /// <c>ChurnBaselineSeconds</c> readable values before it.</summary>
+        public static ChurnResult EvaluateAt(IReadOnlyList<double> values, int index, VerdictOptions options)
+        {
+            if (index < 0 || index >= values.Count || values[index] < 0d) return default;
+
+            var baseline = new List<double>();
+            for (int back = index - 1; back >= 0 && baseline.Count < options.ChurnBaselineSeconds; back--)
+            {
+                if (values[back] >= 0d) baseline.Add(values[back]);
+            }
+            if (baseline.Count < options.ChurnMinBaselineSamples) return default;
+
+            baseline.Sort();
+            int middle = baseline.Count / 2;
+            double median = baseline.Count % 2 == 1 ? baseline[middle] : (baseline[middle - 1] + baseline[middle]) / 2d;
+            double current = values[index];
+            double ratio = current / Math.Max(1d, median);
+            bool triggered = current >= options.ChurnFloorPerSecond && ratio >= options.ChurnFactor;
+            return new ChurnResult(triggered, current, median, ratio);
+        }
+
+        /// <summary>The strongest churn second anywhere in the series, or default when none triggers.</summary>
+        public static ChurnResult Peak(IReadOnlyList<double> values, VerdictOptions options)
+        {
+            ChurnResult best = default;
+            for (int index = 0; index < values.Count; index++)
+            {
+                ChurnResult result = EvaluateAt(values, index, options);
+                if (result.Triggered && result.Ratio > best.Ratio) best = result;
+            }
+            return best;
         }
     }
 }
