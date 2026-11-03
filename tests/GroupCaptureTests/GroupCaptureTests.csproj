@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\GroupCaptureCore.cs" Link="GroupCaptureCore.cs" />
+    <Compile Include="..\..\src\AdaptiveController.cs" Link="AdaptiveController.cs" />
+    <Compile Include="..\..\src\DiagnosticModels.cs" Link="DiagnosticModels.cs" />
+    <Compile Include="..\..\src\CharacterOwnershipTelemetry.cs" Link="CharacterOwnershipTelemetry.cs" />
+    <Compile Include="..\..\src\OwnershipCensusCore.cs" Link="OwnershipCensusCore.cs" />
+  </ItemGroup>
+</Project>
