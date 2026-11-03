@@ -265,7 +265,8 @@ namespace AdaptiveNet.Core
             RuntimeHealthSample serverHealth,
             double frameStallThresholdMilliseconds,
             double severeFrameStallThresholdMilliseconds,
-            double worldSaveMilliseconds = 0d)
+            double worldSaveMilliseconds = 0d,
+            bool serverOverloaded = false)
         {
             // Valheim prepares a world save on the main thread (ZDOMan.PrepareSave), freezing every
             // player at once. Naming it keeps a routine save from reading as an unexplained stall,
@@ -278,14 +279,272 @@ namespace AdaptiveNet.Core
             {
                 return "server-gc-correlated-stall";
             }
-            return serverHealth.MaximumFrameMilliseconds >= severeFrameStallThresholdMilliseconds
-                ? "server-frame-stall"
-                : string.Empty;
+            if (serverHealth.MaximumFrameMilliseconds >= severeFrameStallThresholdMilliseconds)
+            {
+                return "server-frame-stall";
+            }
+            // Last, so a spike keeps its own name; this one is the slow server with no spike at all.
+            return serverOverloaded ? "server-overloaded" : string.Empty;
         }
 
         private static void Append(ref string target, string value)
         {
             target = string.IsNullOrEmpty(target) ? value : target + "+" + value;
+        }
+    }
+
+    /// <summary>
+    /// Thresholds of the incident verdict. The defaults are deliberately conservative: a verdict
+    /// that cries wolf teaches the admin to ignore it. Settings.cs binds each one to the cfg.
+    /// </summary>
+    internal sealed class VerdictOptions
+    {
+        public double FrameStallThresholdMs = 250d;
+        public double SevereFrameStallThresholdMs = 500d;
+        public double DeliveryDelayThresholdMs = 500d;
+
+        // Server load: Valheim's dedicated server settles around 30 FPS (33 ms) in batchmode, so
+        // 1.5x the 50 ms target (75 ms, ~13 FPS) is a server that is really behind, not capped.
+        public double ServerFrameTargetMs = 50d;
+        public double ServerOverloadFactor = 1.5d;
+        public int ServerOverloadSeconds = 10;
+
+        // Peers that must show a symptom in the same second for it to count as correlated.
+        public int CorrelationMinPeers = 2;
+        public double CorrelationMinFraction = 0.5d;
+
+        public double JitterThresholdMs = 40d;
+        public double LossThreshold = 0.15d;
+        public int QualityMinPingPairs = 5;
+
+        public double SaturationRatio = 0.9d;
+        public int SaturationSeconds = 5;
+        public int SaturationPendingFloorBytes = 8 * 1024;
+        public int PendingGrowthBytes = 32 * 1024;
+
+        public double ChurnFactor = 3d;
+        public double ChurnFloorPerSecond = 2000d;
+        public int ChurnBaselineSeconds = 60;
+        public int ChurnMinBaselineSamples = 10;
+
+        public double ServerOverloadThresholdMs => ServerFrameTargetMs * ServerOverloadFactor;
+    }
+
+    /// <summary>
+    /// Tells whether the server is slow without needing a spike: the median of the last N
+    /// per-second frame averages. A median, not a mean, so one long frame (a save, a GC) cannot
+    /// carry the window by itself; that case is the frame-stall trigger's job.
+    /// </summary>
+    internal static class ServerLoad
+    {
+        public static bool IsSustained(IReadOnlyList<double> averageFrameMilliseconds, int seconds, double thresholdMilliseconds)
+        {
+            seconds = Math.Max(1, seconds);
+            if (averageFrameMilliseconds == null || averageFrameMilliseconds.Count < seconds) return false;
+            return LastMedian(averageFrameMilliseconds, averageFrameMilliseconds.Count, seconds) >= thresholdMilliseconds;
+        }
+
+        /// <summary>Median of the <paramref name="seconds"/> values ending at index <paramref name="end"/> (exclusive).</summary>
+        public static double LastMedian(IReadOnlyList<double> values, int end, int seconds)
+        {
+            int start = Math.Max(0, end - seconds);
+            var window = new List<double>(end - start);
+            for (int index = start; index < end; index++) window.Add(values[index]);
+            if (window.Count == 0) return 0d;
+            window.Sort();
+            int middle = window.Count / 2;
+            return window.Count % 2 == 1 ? window[middle] : (window[middle - 1] + window[middle]) / 2d;
+        }
+    }
+
+    /// <summary>
+    /// Keeps the last N per-second frame averages of the server and reports when it enters the
+    /// overloaded state, once per episode, so a long slow stretch opens one capture, not one per cooldown.
+    /// </summary>
+    internal sealed class ServerOverloadTracker
+    {
+        private readonly List<double> _averages = new List<double>();
+
+        public bool Overloaded { get; private set; }
+
+        /// <returns>True only on the sample that makes the server overloaded.</returns>
+        public bool Observe(RuntimeHealthSample interval, int seconds, double thresholdMilliseconds)
+        {
+            seconds = Math.Max(1, seconds);
+            // An interval without frames carries no average; the frame-stall trigger covers a
+            // server that produced none.
+            if (interval.Valid)
+            {
+                _averages.Add(interval.AverageFrameMilliseconds);
+                if (_averages.Count > seconds) _averages.RemoveRange(0, _averages.Count - seconds);
+            }
+            bool was = Overloaded;
+            Overloaded = ServerLoad.IsSustained(_averages, seconds, thresholdMilliseconds);
+            return Overloaded && !was;
+        }
+
+        public void Reset()
+        {
+            _averages.Clear();
+            Overloaded = false;
+        }
+    }
+
+    /// <summary>What the verdict needs of one player's second: a flat copy of the telemetry point,
+    /// so the verdict stays a pure function that the test suites compile without the game.</summary>
+    internal readonly struct VerdictPeerSample
+    {
+        public VerdictPeerSample(
+            double seconds,
+            int pingMilliseconds,
+            double localQuality,
+            double remoteQuality,
+            int pendingBytes,
+            int unackedBytes,
+            double queueDelayMilliseconds,
+            int transportRateBytesPerSecond,
+            double outgoingBytesPerSecond,
+            bool congested,
+            bool clientAvailable,
+            bool clientFocused,
+            bool clientPlayerReady,
+            bool clientTeleporting,
+            double clientFrameMaxMilliseconds,
+            double clientDeliveryDelayMilliseconds)
+        {
+            Seconds = seconds;
+            PingMilliseconds = pingMilliseconds;
+            LocalQuality = localQuality;
+            RemoteQuality = remoteQuality;
+            PendingBytes = pendingBytes;
+            UnackedBytes = unackedBytes;
+            QueueDelayMilliseconds = queueDelayMilliseconds;
+            TransportRateBytesPerSecond = transportRateBytesPerSecond;
+            OutgoingBytesPerSecond = outgoingBytesPerSecond;
+            Congested = congested;
+            ClientAvailable = clientAvailable;
+            ClientFocused = clientFocused;
+            ClientPlayerReady = clientPlayerReady;
+            ClientTeleporting = clientTeleporting;
+            ClientFrameMaxMilliseconds = clientFrameMaxMilliseconds;
+            ClientDeliveryDelayMilliseconds = clientDeliveryDelayMilliseconds;
+        }
+
+        public double Seconds { get; }
+        public int PingMilliseconds { get; }
+        public double LocalQuality { get; }
+        public double RemoteQuality { get; }
+        public int PendingBytes { get; }
+        public int UnackedBytes { get; }
+        public double QueueDelayMilliseconds { get; }
+        public int TransportRateBytesPerSecond { get; }
+        public double OutgoingBytesPerSecond { get; }
+        public bool Congested { get; }
+        public bool ClientAvailable { get; }
+        public bool ClientFocused { get; }
+        public bool ClientPlayerReady { get; }
+        public bool ClientTeleporting { get; }
+        public double ClientFrameMaxMilliseconds { get; }
+        public double ClientDeliveryDelayMilliseconds { get; }
+    }
+
+    internal sealed class VerdictPeerInput
+    {
+        public VerdictPeerInput(string name, long uid, bool triggered, IReadOnlyList<VerdictPeerSample> samples)
+        {
+            Name = string.IsNullOrEmpty(name) ? "unknown" : name;
+            Uid = uid;
+            Triggered = triggered;
+            Samples = samples ?? new VerdictPeerSample[0];
+        }
+
+        public string Name { get; }
+        public long Uid { get; }
+        /// <summary>Whether this player's own anomaly opened or joined the incident.</summary>
+        public bool Triggered { get; }
+        /// <summary>Oldest first, one per second (pre and post windows together).</summary>
+        public IReadOnlyList<VerdictPeerSample> Samples { get; }
+    }
+
+    internal readonly struct VerdictServerSample
+    {
+        public VerdictServerSample(
+            double seconds,
+            RuntimeHealthSample health,
+            double worldSaveMilliseconds,
+            int zdoObjects = -1,
+            int zdoSentLastSecond = -1,
+            int zdoReceivedLastSecond = -1,
+            int zdoClientChangeQueue = -1)
+        {
+            Seconds = seconds;
+            Health = health;
+            WorldSaveMilliseconds = worldSaveMilliseconds;
+            ZdoObjects = zdoObjects;
+            ZdoSentLastSecond = zdoSentLastSecond;
+            ZdoReceivedLastSecond = zdoReceivedLastSecond;
+            ZdoClientChangeQueue = zdoClientChangeQueue;
+        }
+
+        public double Seconds { get; }
+        public RuntimeHealthSample Health { get; }
+        public double WorldSaveMilliseconds { get; }
+        /// <summary>ZDOMan counters; -1 when they could not be read.</summary>
+        public int ZdoObjects { get; }
+        public int ZdoSentLastSecond { get; }
+        public int ZdoReceivedLastSecond { get; }
+        public int ZdoClientChangeQueue { get; }
+
+        /// <summary>ZDOs the server moved in the second, or -1 when unreadable.</summary>
+        public double ZdoTraffic => ZdoSentLastSecond < 0 || ZdoReceivedLastSecond < 0
+            ? -1d
+            : (double)ZdoSentLastSecond + ZdoReceivedLastSecond;
+    }
+
+    /// <summary>Counts, second by second, how many players show a symptom together. Eight players
+    /// stalling in the same second point at the server, not at eight connections.</summary>
+    internal static class PeerCorrelation
+    {
+        /// <summary>A symptom that does not depend on a player's own machine being idle: the
+        /// connection is backed off, or an in-game focused client froze or reported late.</summary>
+        public static bool IsAffected(VerdictPeerSample sample, VerdictOptions options)
+        {
+            if (sample.Congested) return true;
+            bool inGame = sample.ClientAvailable && sample.ClientPlayerReady && !sample.ClientTeleporting && sample.ClientFocused;
+            return inGame &&
+                   (sample.ClientFrameMaxMilliseconds >= options.SevereFrameStallThresholdMs ||
+                    sample.ClientDeliveryDelayMilliseconds >= options.DeliveryDelayThresholdMs);
+        }
+
+        public static long Key(double seconds) => (long)Math.Round(seconds);
+
+        public static void Count(
+            IReadOnlyList<VerdictPeerInput> peers,
+            long key,
+            VerdictOptions options,
+            out int affected,
+            out int total)
+        {
+            affected = 0;
+            total = 0;
+            for (int peerIndex = 0; peerIndex < peers.Count; peerIndex++)
+            {
+                IReadOnlyList<VerdictPeerSample> samples = peers[peerIndex].Samples;
+                for (int index = 0; index < samples.Count; index++)
+                {
+                    if (Key(samples[index].Seconds) != key) continue;
+                    total++;
+                    if (IsAffected(samples[index], options)) affected++;
+                    break;
+                }
+            }
+        }
+
+        public static bool IsCorrelated(int affected, int total, VerdictOptions options)
+        {
+            if (total <= 0) return false;
+            int needed = Math.Max(options.CorrelationMinPeers, (int)Math.Ceiling(options.CorrelationMinFraction * total));
+            return affected >= needed;
         }
     }
 }
