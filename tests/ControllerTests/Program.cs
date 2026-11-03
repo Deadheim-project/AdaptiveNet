@@ -816,7 +816,108 @@ static VerdictCause? Find(IReadOnlyList<VerdictCause> causes, string code, strin
     Test.Equal(0, IncidentVerdict.Evaluate(null, null, null).Count, "entradas nulas nao quebram");
 }
 
+// ---- CPU do host: /proc/stat, conta de delta e regra do veredito ----
+{
+    string realStat =
+        "cpu  10132153 290696 3084719 46828483 16683 0 25195 175628 0 0\n" +
+        "cpu0 1393280 64966 436308 5775321 2260 0 7103 18420 0 0\n" +
+        "cpu1 1264523 28752 379403 5909552 2043 0 3621 21088 0 0\n" +
+        "intr 1234567 0 0 1\nctxt 98765432\nbtime 1730000000\n";
+    Test.True(ProcStatParser.TryParse(realStat, out CpuTimes parsed), "/proc/stat real e lido");
+    Test.True(parsed.Total == 10132153UL + 290696UL + 3084719UL + 46828483UL + 16683UL + 0UL + 25195UL + 175628UL, "total soma user..steal sem guest");
+    Test.True(parsed.Idle == 46828483UL + 16683UL, "ocioso = idle + iowait");
+    Test.True(parsed.Steal == 175628L, "steal lido");
+
+    Test.True(ProcStatParser.TryParse("cpu  100 0 50 850\n", out CpuTimes old), "kernel antigo com 4 campos");
+    Test.True(old.Steal == -1L && old.Total == 1000UL, "sem steal = nao medido");
+    Test.True(ProcStatParser.TryParse("cpu  100 0 50 850 0 0 0 0 5 5\n", out CpuTimes guest), "guest e guest_nice");
+    Test.True(guest.Total == 1000UL, "guest ja esta em user: nao soma de novo");
+    Test.True(!ProcStatParser.TryParse("", out _), "texto vazio nao e lido");
+    Test.True(!ProcStatParser.TryParse("cpu0 1 2 3 4 5\n", out _), "so a linha agregada vale");
+    Test.True(!ProcStatParser.TryParse("cpu  1 2 x 4 5\n", out _), "campo nao numerico");
+    Test.True(!ProcStatParser.TryParse("cpu  1 2 3\n", out _), "poucos campos");
+
+    var before = new CpuTimes(1000UL, 600UL, 10L);
+    var after = new CpuTimes(1400UL, 700UL, 50L);
+    Test.Near(75d, HostCpuMath.SystemPercent(before, after), 0.0001, "sistema = (delta total - delta ocioso) / delta total");
+    Test.Near(10d, HostCpuMath.StealPercent(before, after), 0.0001, "steal = delta steal / delta total");
+    Test.Near(-1d, HostCpuMath.SystemPercent(after, after), 0.0001, "sem delta = nao medido");
+    Test.Near(-1d, HostCpuMath.SystemPercent(after, before), 0.0001, "contador que voltou = nao medido");
+    Test.Near(-1d, HostCpuMath.StealPercent(new CpuTimes(1000UL, 600UL, -1L), after), 0.0001, "steal ausente = nao medido");
+    Test.Near(-1d, HostCpuMath.SystemPercent(before, new CpuTimes(1400UL, 100UL, 50L)), 0.0001, "ocioso maior que o total = nao medido");
+
+    // Sonda com leitor falso: baseline, valores e falhas que nunca lancam.
+    var reads = new Queue<CpuTimes?>();
+    var fake = new FakeCpuReader(reads);
+    double processMs = 0d;
+    var probe = new HostCpuProbe(fake, () => processMs);
+    reads.Enqueue(new CpuTimes(1000UL, 600UL, 0L));
+    HostCpuSample first = probe.Sample(10d);
+    Test.True(first.Measured && first.SystemCpuPercent < 0d && first.ProcessCpuMsPerSecond < 0d, "primeira amostra so cria o baseline");
+    reads.Enqueue(new CpuTimes(1400UL, 700UL, 40L));
+    processMs = 850d;
+    HostCpuSample second = probe.Sample(11d);
+    Test.Near(75d, second.SystemCpuPercent, 0.0001, "sonda: sistema em %");
+    Test.Near(10d, second.StealPercent, 0.0001, "sonda: steal em %");
+    Test.Near(850d, second.ProcessCpuMsPerSecond, 0.0001, "sonda: processo em ms/s");
+    for (int i = 0; i < 5; i++) { reads.Enqueue(null); probe.Sample(12d + i); }
+    Test.True(probe.Disabled, "falhas seguidas desligam a leitura");
+    Test.True(!probe.Sample(30d).Measured, "desligada = nao medido, sem excecao");
+    var thrower = new HostCpuProbe(fake, () => throw new InvalidOperationException("sem acesso"));
+    Test.True(!thrower.Sample(1d).Measured, "excecao interna vira nao medido");
+
+    var window = new HostCpuLogWindow();
+    Test.True(window.Format() == "hostCpu=n/a", "log sem medida");
+    window.Add(new HostCpuSample(800d, 60d, 0d, 4));
+    window.Add(new HostCpuSample(900d, 95d, 12.5d, 4));
+    Test.True(window.Format() == "hostCpu=proc 850ms/s, sysMax 95%, stealMax 12.5%", "log resume media do processo e maximos: " + window.Format());
+
+    // Regra do veredito.
+    var vo = new VerdictOptions();
+    HostCpuSample Host(double processMsPerSecond, double system, double steal = -1d) =>
+        new HostCpuSample(processMsPerSecond, system, steal, 4);
+    List<VerdictServerSample> Run(Func<int, HostCpuSample> host, double slowAvg = 120d) =>
+        ServerOf(30, t => new VerdictServerSample(t, t >= 10 && t < 16 ? Health(avgMs: slowAvg, maxMs: slowAvg + 40) : Health(), 0, host: host(t)));
+    bool Has(List<VerdictCause> list, string code) => list.Exists(c => c.Code == code);
+
+    List<VerdictCause> starved = IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), Run(t => Host(300d, 96d)), vo);
+    Test.True(Has(starved, "host-cpu-starved") && !Has(starved, "game-cpu-saturated"), "sistema alto com processo baixo = host sem CPU");
+    VerdictCause starvedCause = starved.Find(c => c.Code == "host-cpu-starved");
+    Test.True(starvedCause.Sentence.Contains("sistema a 96%") && starvedCause.Sentence.Contains("300 ms/s"), "frase cita X e Y: " + starvedCause.Sentence);
+    Test.True(starvedCause.Confidence == VerdictConfidence.Medium, "sem steal a confianca e media");
+
+    List<VerdictCause> steal = IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), Run(t => Host(300d, 40d, 22d)), vo);
+    Test.True(Has(steal, "host-cpu-starved") && steal.Find(c => c.Code == "host-cpu-starved").Confidence == VerdictConfidence.High, "steal alto = host sem CPU, confianca alta");
+
+    List<VerdictCause> bound = IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), Run(t => Host(1000d, 30d)), vo);
+    Test.True(Has(bound, "game-cpu-saturated") && !Has(bound, "host-cpu-starved"), "processo em ~1 nucleo = jogo saturado");
+
+    List<VerdictCause> busyButMine = IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), Run(t => Host(1500d, 99d)), vo);
+    Test.True(Has(busyButMine, "game-cpu-saturated") && !Has(busyButMine, "host-cpu-starved"), "sistema alto porque o processo e quem usa = jogo saturado");
+
+    List<VerdictCause> notMeasured = IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), Run(t => default), vo);
+    Test.True(!Has(notMeasured, "host-cpu-starved") && !Has(notMeasured, "game-cpu-saturated"), "sem medida do host nao inventa causa");
+
+    var fine = ServerOf(30, t => new VerdictServerSample(t, Health(), 0, host: Host(300d, 99d, 30d)));
+    Test.True(!Has(IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), fine, vo), "host-cpu-starved"), "host ocupado com o servidor bem nao e causa");
+
+    var one = ServerOf(30, t => new VerdictServerSample(t, t == 10 ? Health(avgMs: 120, maxMs: 160) : Health(), 0, host: Host(300d, 99d)));
+    Test.True(!Has(IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), one, vo), "host-cpu-starved"), "um segundo so nao chega a HostMinSeconds");
+}
+
 Test.Summary();
+
+sealed class FakeCpuReader : ICpuTimesReader
+{
+    private readonly Queue<CpuTimes?> _queue;
+    public FakeCpuReader(Queue<CpuTimes?> queue) { _queue = queue; }
+    public bool TryRead(out CpuTimes times)
+    {
+        CpuTimes? next = _queue.Count > 0 ? _queue.Dequeue() : null;
+        times = next ?? default;
+        return next.HasValue;
+    }
+}
 
 static class Test
 {
