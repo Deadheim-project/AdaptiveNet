@@ -608,4 +608,85 @@ namespace AdaptiveNet.Core
             return jitterHigh || lossHigh;
         }
     }
+
+    internal readonly struct SaturationResult
+    {
+        public SaturationResult(bool saturated, bool byRate, int seconds, double peakOutgoingBytesPerSecond, int rateBytesPerSecond, int peakPendingBytes, int pendingFromBytes)
+        {
+            Saturated = saturated;
+            ByRate = byRate;
+            Seconds = seconds;
+            PeakOutgoingBytesPerSecond = peakOutgoingBytesPerSecond;
+            RateBytesPerSecond = rateBytesPerSecond;
+            PeakPendingBytes = peakPendingBytes;
+            PendingFromBytes = pendingFromBytes;
+        }
+
+        public bool Saturated { get; }
+        /// <summary>True when the output sat at the Steam rate; false when only the pending bytes kept growing.</summary>
+        public bool ByRate { get; }
+        public int Seconds { get; }
+        public double PeakOutgoingBytesPerSecond { get; }
+        public int RateBytesPerSecond { get; }
+        public int PeakPendingBytes { get; }
+        public int PendingFromBytes { get; }
+    }
+
+    /// <summary>
+    /// A saturated link is one the server cannot push more bytes into: its output sits at the
+    /// Steam rate while bytes wait to go out, or the bytes waiting keep growing. Bytes sent and
+    /// not yet acknowledged are NOT a queue: at 225-250 ms ping a healthy link always has a
+    /// round trip of data in flight, so only the pending bytes count here.
+    /// </summary>
+    internal static class LinkSaturation
+    {
+        public static SaturationResult Analyze(IReadOnlyList<VerdictPeerSample> samples, VerdictOptions options)
+        {
+            int needed = Math.Max(2, options.SaturationSeconds);
+
+            int run = 0;
+            int bestRun = 0;
+            double peakOut = 0d;
+            int rate = 0;
+            int peakPending = 0;
+            for (int index = 0; index < samples.Count; index++)
+            {
+                VerdictPeerSample sample = samples[index];
+                bool atRate = sample.TransportRateBytesPerSecond > 0 &&
+                              sample.OutgoingBytesPerSecond >= options.SaturationRatio * sample.TransportRateBytesPerSecond &&
+                              sample.PendingBytes >= options.SaturationPendingFloorBytes;
+                run = atRate ? run + 1 : 0;
+                if (run > bestRun)
+                {
+                    bestRun = run;
+                    peakOut = Math.Max(peakOut, sample.OutgoingBytesPerSecond);
+                    rate = sample.TransportRateBytesPerSecond;
+                    peakPending = Math.Max(peakPending, sample.PendingBytes);
+                }
+            }
+            if (bestRun >= needed)
+            {
+                return new SaturationResult(true, true, bestRun, peakOut, rate, peakPending, 0);
+            }
+
+            // Pending bytes that never drop for N samples and end well above where they began.
+            for (int start = 0; start + needed <= samples.Count; start++)
+            {
+                bool rising = true;
+                for (int step = start + 1; step < start + needed && rising; step++)
+                {
+                    rising = samples[step].PendingBytes >= samples[step - 1].PendingBytes;
+                }
+                int first = samples[start].PendingBytes;
+                int last = samples[start + needed - 1].PendingBytes;
+                if (rising &&
+                    last >= options.SaturationPendingFloorBytes &&
+                    last - first >= options.PendingGrowthBytes)
+                {
+                    return new SaturationResult(true, false, needed, 0d, 0, last, first);
+                }
+            }
+            return default;
+        }
+    }
 }

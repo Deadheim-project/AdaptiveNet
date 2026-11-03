@@ -493,6 +493,46 @@ static List<VerdictServerSample> ServerOf(int seconds, Func<int, VerdictServerSa
     Test.True(!LinkQuality.IsBad(LinkQuality.Compute(fewPairs), options, out _, out _), "poucos pares de ping nao bastam");
 }
 
+// ---- Regra 3: link-saturated separa pending de unacked ----
+{
+    var options = new VerdictOptions();
+
+    var atRate = new List<VerdictPeerSample>();
+    for (int t = 0; t < 12; t++) atRate.Add(PeerSecond(t, rate: 150 * 1024, outBps: 148 * 1024, pending: t < 3 ? 0 : 40 * 1024));
+    SaturationResult byRate = LinkSaturation.Analyze(atRate, options);
+    Test.True(byRate.Saturated && byRate.ByRate, "saida no teto Steam com bytes pendentes por 9 s satura");
+    Test.True(byRate.Seconds >= 5, "duracao da saturacao registrada");
+
+    var shortBurst = new List<VerdictPeerSample>();
+    for (int t = 0; t < 12; t++) shortBurst.Add(PeerSecond(t, outBps: (t >= 4 && t < 7) ? 148 * 1024 : 10 * 1024, pending: 40 * 1024));
+    Test.True(!LinkSaturation.Analyze(shortBurst, options).Saturated, "rajada de 3 s no teto nao e saturacao");
+
+    var fullPipeNoQueue = new List<VerdictPeerSample>();
+    for (int t = 0; t < 12; t++) fullPipeNoQueue.Add(PeerSecond(t, outBps: 149 * 1024, pending: 0));
+    Test.True(!LinkSaturation.Analyze(fullPipeNoQueue, options).Saturated, "saida no teto sem pendente nao satura (so fluxo cheio)");
+
+    var growing = new List<VerdictPeerSample>();
+    for (int t = 0; t < 12; t++) growing.Add(PeerSecond(t, outBps: 60 * 1024, pending: t * 12 * 1024));
+    SaturationResult byGrowth = LinkSaturation.Analyze(growing, options);
+    Test.True(byGrowth.Saturated && !byGrowth.ByRate, "pendente crescendo sem parar satura");
+    Test.True(byGrowth.PeakPendingBytes > byGrowth.PendingFromBytes, "crescimento registrado");
+
+    var sawtooth = new List<VerdictPeerSample>();
+    for (int t = 0; t < 12; t++) sawtooth.Add(PeerSecond(t, pending: (t % 2) * 50 * 1024));
+    Test.True(!LinkSaturation.Analyze(sawtooth, options).Saturated, "pendente que sobe e desce nao satura");
+
+    // O caso do doc: ping alto (225-250 ms) enche o 'nao confirmado' sem fila real.
+    var highPing = new List<VerdictPeerSample>();
+    for (int t = 0; t < 20; t++) highPing.Add(PeerSecond(t, ping: 240, unacked: (60 + t * 4) * 1024, outBps: 70 * 1024, pending: 0));
+    Test.True(!LinkSaturation.Analyze(highPing, options).Saturated, "ping alto com muito unacked e pendente zero NAO e saturacao");
+
+    var highPingAtRate = new List<VerdictPeerSample>();
+    for (int t = 0; t < 20; t++) highPingAtRate.Add(PeerSecond(t, ping: 240, unacked: 200 * 1024, outBps: 149 * 1024, pending: 0));
+    Test.True(!LinkSaturation.Analyze(highPingAtRate, options).Saturated, "ping alto com unacked enorme e saida alta, mas pendente 0, NAO satura");
+
+    Test.True(!LinkSaturation.Analyze(new List<VerdictPeerSample>(), options).Saturated, "sem amostras, sem veredito");
+}
+
 Test.Summary();
 
 static class Test
