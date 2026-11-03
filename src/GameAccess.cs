@@ -65,6 +65,34 @@ namespace AdaptiveNet
             return zdoPeer != null && _getPeerZdoRevision != null && _getPeerZdoRevision(zdoPeer, id, out dataRevision);
         }
 
+        /// <summary>
+        /// The four cheap ZDOMan counters behind the churn verdict. All four are public instance
+        /// methods of ZDOMan in assembly_valheim (checked 2026-11-03 against the reference
+        /// assembly: NrOfObjects = m_objectsByID.Count, GetSentZDOs/GetRecvZDOs = last-second
+        /// counters, GetClientChangeQueue = m_clientChangeQueue.Count), so this is a plain call
+        /// that the compiler binds to the original assembly, not a reflection read. It never
+        /// enumerates the ZDOs.
+        /// </summary>
+        public static bool TryReadZdoCounters(out int objects, out int sentLastSecond, out int receivedLastSecond, out int clientChangeQueue)
+        {
+            objects = sentLastSecond = receivedLastSecond = clientChangeQueue = -1;
+            try
+            {
+                ZDOMan manager = ZDOMan.instance;
+                if (manager == null) return false;
+                objects = manager.NrOfObjects();
+                sentLastSecond = manager.GetSentZDOs();
+                receivedLastSecond = manager.GetRecvZDOs();
+                clientChangeQueue = manager.GetClientChangeQueue();
+                return true;
+            }
+            catch (Exception)
+            {
+                objects = sentLastSecond = receivedLastSecond = clientChangeQueue = -1;
+                return false;
+            }
+        }
+
         private static Func<TTarget, TValue> CreateFieldGetter<TTarget, TValue>(string name)
         {
             FieldInfo field = RequireField(typeof(TTarget), name, typeof(TValue));
