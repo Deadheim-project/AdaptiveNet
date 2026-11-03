@@ -201,8 +201,8 @@ Assert.Equal(75, Array.IndexOf(incidentColumns, "server_owned_nonplayer_characte
     "the incident columns from 0.4 keep their positions");
 Assert.True(IncidentTelemetry.HeaderForTesting.Contains(",client_hit_upload_max_ms,server_world_save_ms,census_creatures_near,"),
     "PvP columns keep their place and the census columns come right after them");
-Assert.True(IncidentTelemetry.HeaderForTesting.EndsWith(",client_process_memory_mib,owner_echo_median_ms,owner_echo_last_ms,owner_echo_samples,owner_echo_timeouts,owner_echo_mobs_simulated,verdict"),
-    "census, protocol 3 and owner echo columns come before the verdict, which is appended last");
+Assert.True(IncidentTelemetry.HeaderForTesting.EndsWith(",client_process_memory_mib,host_process_cpu_ms_s,host_system_cpu_pct,host_steal_pct,owner_echo_median_ms,owner_echo_last_ms,owner_echo_samples,owner_echo_timeouts,owner_echo_mobs_simulated,verdict"),
+    "census, protocol 3, host CPU and owner echo columns come before the verdict, which is appended last");
 string verdictRow = IncidentTelemetry.FormatForTesting(1, "pre", "wire-test", point, "server-stall [alta]: servidor travou 640 ms, 6 de 8");
 Assert.True(verdictRow.EndsWith(",\"server-stall [alta]: servidor travou 640 ms, 6 de 8\""),
     "the verdict is quoted as the last cell, commas inside included");
@@ -254,7 +254,7 @@ Assert.Equal("3072", censusRow[Array.IndexOf(censusColumns, "client_process_memo
 
 var echoPoint = new PeerTelemetryPoint(
     DateTime.UtcNow.Ticks, 15.5d, "EchoTester", 126L, network, decision, 150 * 1024, 4, ownership, v3Snapshot, health, 50, 3, 5,
-    default, 0d, default, new OwnerEchoSample(true, true, 123.5d, 98d, 8, 2, 14, "Ana"));
+    default, 0d, default, default, new OwnerEchoSample(true, true, 123.5d, 98d, 8, 2, 14, "Ana"));
 string[] echoRow = IncidentTelemetry.FormatForTesting(4, "pre", "wire-test", echoPoint).Split(',');
 Assert.Equal(censusColumns.Length, echoRow.Length, "an owner echo row stays aligned with the header");
 Assert.Equal("123.500", echoRow[Array.IndexOf(censusColumns, "owner_echo_median_ms")], "owner echo median column");
@@ -266,7 +266,7 @@ Assert.Equal("-1", incidentRow.Split(',')[Array.IndexOf(censusColumns, "owner_ec
 Assert.Equal("-1", incidentRow.Split(',')[Array.IndexOf(censusColumns, "owner_echo_timeouts")], "a peer never probed reads -1 timeouts");
 var silentPoint = new PeerTelemetryPoint(
     DateTime.UtcNow.Ticks, 16.5d, "NoMod", 127L, network, decision, 150 * 1024, 4, ownership, v3Snapshot, health, 50, 3, 5,
-    default, 0d, default, new OwnerEchoSample(true, false, 0d, 0d, 0, 3, 9, null));
+    default, 0d, default, default, new OwnerEchoSample(true, false, 0d, 0d, 0, 3, 9, null));
 string[] silentRow = IncidentTelemetry.FormatForTesting(5, "pre", "wire-test", silentPoint).Split(',');
 Assert.Equal("-1", silentRow[Array.IndexOf(censusColumns, "owner_echo_median_ms")], "a peer that never answered is not measured");
 Assert.Equal("3", silentRow[Array.IndexOf(censusColumns, "owner_echo_timeouts")], "its timeouts are still counted");
