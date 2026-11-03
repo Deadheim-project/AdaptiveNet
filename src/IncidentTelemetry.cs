@@ -32,7 +32,8 @@ namespace AdaptiveNet
             PvpPeerStats pvp = default,
             double serverWorldSaveMilliseconds = 0d,
             PeerCensusSample census = default,
-            HostCpuSample host = default)
+            HostCpuSample host = default,
+            OwnerEchoSample ownerEcho = default)
         {
             UtcTicks = utcTicks;
             SessionSeconds = sessionSeconds;
@@ -52,6 +53,7 @@ namespace AdaptiveNet
             ServerWorldSaveMilliseconds = Math.Max(0d, serverWorldSaveMilliseconds);
             Census = census;
             Host = host;
+            OwnerEcho = ownerEcho;
         }
 
         public long UtcTicks { get; }
@@ -74,6 +76,8 @@ namespace AdaptiveNet
         public PeerCensusSample Census { get; }
         /// <summary>Server process and host CPU - not measured when default.</summary>
         public HostCpuSample Host { get; }
+        /// <summary>Echo latency to this peer as a creature owner (server) - not measured when default.</summary>
+        public OwnerEchoSample OwnerEcho { get; }
     }
 
     internal sealed class IncidentTelemetry : IDisposable
@@ -107,6 +111,8 @@ namespace AdaptiveNet
             "client_ai_instances,client_ai_owned,client_ai_other,client_process_cpu_ms_s,client_system_cpu_pct,client_process_memory_mib," +
             // Server process and host CPU (-1 = not measured), before the verdict.
             "host_process_cpu_ms_s,host_system_cpu_pct,host_steal_pct," +
+            // Latency to the creature owner (echo RPC); -1 = not measured.
+            "owner_echo_median_ms,owner_echo_last_ms,owner_echo_samples,owner_echo_timeouts,owner_echo_mobs_simulated," +
             // Incident verdict (opening, or final on the last post row), appended last.
             "verdict";
 
@@ -476,6 +482,11 @@ namespace AdaptiveNet
                 point.Host.Measured ? F(point.Host.ProcessCpuMsPerSecond) : "-1",
                 point.Host.Measured ? F(point.Host.SystemCpuPercent) : "-1",
                 point.Host.Measured ? F(point.Host.StealPercent) : "-1",
+                point.OwnerEcho.Measured ? F(point.OwnerEcho.MedianMilliseconds) : "-1",
+                point.OwnerEcho.Measured ? F(point.OwnerEcho.LastMilliseconds) : "-1",
+                point.OwnerEcho.Samples.ToString(CultureInfo.InvariantCulture),
+                point.OwnerEcho.Timeouts.ToString(CultureInfo.InvariantCulture),
+                point.OwnerEcho.MobsSimulated.ToString(CultureInfo.InvariantCulture),
                 Escape(verdict));
         }
 

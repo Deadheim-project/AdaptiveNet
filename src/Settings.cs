@@ -66,6 +66,13 @@ namespace AdaptiveNet
         public ConfigEntry<float> OwnerCensusMaxScanMs { get; private set; }
         public ConfigEntry<int> OwnerCensusMaxZdosPerScan { get; private set; }
         public ConfigEntry<int> OwnershipDisagreementMinCreatures { get; private set; }
+        public ConfigEntry<bool> OwnerEcho { get; private set; }
+        public ConfigEntry<float> OwnerEchoIntervalSeconds { get; private set; }
+        public ConfigEntry<int> OwnerEchoMaxPeers { get; private set; }
+        public ConfigEntry<float> OwnerEchoTimeoutSeconds { get; private set; }
+        public ConfigEntry<int> OwnerEchoWindow { get; private set; }
+        public ConfigEntry<float> OwnerEchoLagThresholdMs { get; private set; }
+        public ConfigEntry<int> OwnerEchoMinMobs { get; private set; }
         public ConfigEntry<int> IncidentFileMaxMiB { get; private set; }
         public ConfigEntry<int> RetainedIncidentFiles { get; private set; }
         public ConfigEntry<int> IncidentRetentionDays { get; private set; }
@@ -203,6 +210,17 @@ namespace AdaptiveNet
                     new ConfigDescription("Hard cap of ZDOs visited by one scan (a scan that hits it is cut and marked truncated).", new AcceptableValueRange<int>(1000, 5000000)))),
                 OwnershipDisagreementMinCreatures = Synced(config.Bind("Diagnostics", "OwnershipDisagreementMinCreatures", 4,
                     new ConfigDescription("Minimum difference between the creatures a client says it simulates and what the server counts for it before a (rate-limited) warning is logged.", new AcceptableValueRange<int>(1, 100)))),
+                // Owner echo is read on the server only (clients always answer), so none is synced.
+                OwnerEcho = config.Bind("Diagnostics", "OwnerEcho", true,
+                    "Server only: measure the round trip to the peers that simulate the most creatures near players (a 12-byte RPC echo, at most one per peer per interval, no ZDO scan). Peers without AdaptiveNet do not answer and stay 'not measured'."),
+                OwnerEchoIntervalSeconds = config.Bind("Diagnostics", "OwnerEchoIntervalSeconds", 4f,
+                    new ConfigDescription("Minimum seconds between two echoes to the same peer.", new AcceptableValueRange<float>(1f, 60f))),
+                OwnerEchoMaxPeers = config.Bind("Diagnostics", "OwnerEchoMaxPeers", 4,
+                    new ConfigDescription("Peers probed per round: the owners that simulate the most creatures near players.", new AcceptableValueRange<int>(1, 16))),
+                OwnerEchoTimeoutSeconds = config.Bind("Diagnostics", "OwnerEchoTimeoutSeconds", 2f,
+                    new ConfigDescription("An echo not answered in this time counts as a timeout (a peer that answered before is then counted at this value; one that never answered stays not measured).", new AcceptableValueRange<float>(0.5f, 10f))),
+                OwnerEchoWindow = config.Bind("Diagnostics", "OwnerEchoWindow", 8,
+                    new ConfigDescription("Last N round trips kept per peer; the median of them is reported.", new AcceptableValueRange<int>(3, 64))),
                 IncidentFileMaxMiB = Synced(config.Bind("Diagnostics", "IncidentFileMaxMiB", 16,
                     new ConfigDescription("Rotate the incident CSV at this size.", new AcceptableValueRange<int>(1, 256)))),
                 RetainedIncidentFiles = Synced(config.Bind("Diagnostics", "RetainedIncidentFiles", 16,
@@ -230,6 +248,10 @@ namespace AdaptiveNet
                     new ConfigDescription("ZDOs moved in a second (sent + received) that count as object churn when this many times the median of the previous 60 s.", new AcceptableValueRange<float>(1.5f, 50f))),
                 ChurnFloorPerSecond = config.Bind("Verdict", "ZdoChurnFloorPerSecond", 2000,
                     new ConfigDescription("ZDOs per second below which a rise is never called churn, however large the ratio.", new AcceptableValueRange<int>(1, 1000000))),
+                OwnerEchoLagThresholdMs = config.Bind("Verdict", "OwnerEchoLagThresholdMs", 200f,
+                    new ConfigDescription("mob-owner-lag: median echo round trip to a creature owner at or above this counts as a laggy owner.", new AcceptableValueRange<float>(50f, 2000f))),
+                OwnerEchoMinMobs = config.Bind("Verdict", "OwnerEchoMinMobs", 3,
+                    new ConfigDescription("mob-owner-lag: creatures the laggy owner must simulate near players for the cause to be named.", new AcceptableValueRange<int>(1, 500))),
                 HostSystemCpuPercent = config.Bind("Verdict", "HostSystemCpuPercent", 90f,
                     new ConfigDescription("host-cpu-starved: host CPU use (%) that counts as busy in a second when the server frame was bad and the game process used less than HostProcessSaturatedMsPerSecond.", new AcceptableValueRange<float>(50f, 100f))),
                 HostStealPercent = config.Bind("Verdict", "HostStealPercent", 10f,
@@ -259,6 +281,8 @@ namespace AdaptiveNet
                 PendingGrowthBytes = PendingGrowthKiB.Value * 1024,
                 ChurnFactor = ChurnFactor.Value,
                 ChurnFloorPerSecond = ChurnFloorPerSecond.Value,
+                OwnerEchoLagThresholdMs = OwnerEchoLagThresholdMs.Value,
+                OwnerEchoMinMobs = OwnerEchoMinMobs.Value,
                 HostSystemCpuPercent = HostSystemCpuPercent.Value,
                 HostStealPercent = HostStealPercent.Value,
                 HostProcessSaturatedMsPerSecond = HostProcessSaturatedMsPerSecond.Value,

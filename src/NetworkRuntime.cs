@@ -192,6 +192,7 @@ namespace AdaptiveNet
             SteamInterface.Initialize(log);
             PinnedSteamSender.Initialize(log);
             ClientTelemetryRpc.Initialize(log);
+            OwnerEchoRuntime.Initialize(log);
             PvpTelemetry.Initialize(log);
             ServerOwnershipCensus.Initialize(log);
             _ownershipDisagreement.Reset();
@@ -421,6 +422,7 @@ namespace AdaptiveNet
             if (_settingsChanged) ApplySettingChanges();
             RecheckConflictsOnce();
             ClientTelemetryRpc.EnsureRegistered();
+            OwnerEchoRuntime.EnsureRegistered();
             if (unscaledTime < _nextSampleTime) return;
 
             _nextSampleTime = unscaledTime + Math.Max(0.25f, _settings.SampleIntervalSeconds.Value);
@@ -531,7 +533,8 @@ namespace AdaptiveNet
                         pvp.Get(peer.m_uid),
                         pvp.WorldSaveMilliseconds,
                         ServerOwnershipCensus.Get(peer.m_uid, unscaledTime),
-                        _hostCpu);
+                        _hostCpu,
+                        OwnerEchoRuntime.Get(peer.m_uid, unscaledTime));
                     CheckOwnershipAgreement(point, unscaledTime);
                     context.History.Add(point);
                     currentPoints.Add(point);
@@ -566,6 +569,7 @@ namespace AdaptiveNet
                 for (int index = 0; index < staleConnections.Length; index++)
                 {
                     ConnectionContext stale = staleConnections[index];
+                    OwnerEchoRuntime.Forget(stale.PeerUid);
                     bool wasDegraded = stale.WasCongested ||
                                        unscaledTime - stale.LastAnomalyTime <= degradedWindowSeconds;
                     if (!wasDegraded) continue;
@@ -712,8 +716,10 @@ namespace AdaptiveNet
             _incidents?.Dispose();
             _incidents = null;
             ClientTelemetryRpc.Shutdown();
+            OwnerEchoRuntime.Shutdown();
             PvpTelemetry.Reset();
             ServerOwnershipCensus.Reset();
+            OwnerEchoRuntime.Reset();
             AdaptivePeerScheduler.Reset();
             PinnedSteamSender.Reset();
             SteamInterface.Reset();
@@ -947,7 +953,10 @@ namespace AdaptiveNet
                 client.PlayerReady,
                 client.Teleporting,
                 client.Health.MaximumFrameMilliseconds,
-                client.DeliveryDelayMilliseconds);
+                client.DeliveryDelayMilliseconds,
+                point.OwnerEcho.Measured ? point.OwnerEcho.MedianMilliseconds : -1d,
+                point.OwnerEcho.MobsSimulated,
+                point.OwnerEcho.NearPlayers);
         }
 
         /// <summary>
@@ -998,6 +1007,9 @@ namespace AdaptiveNet
             // desliga so essa telemetria, com aviso.
             ServerOwnershipCensus.Tick(now, _settings);
             ServerOwnershipCensus.LogIfDue(now, _settings);
+            // Eco ate o dono (OwnerEchoRuntime): pacotes de 12 bytes, sem varrer ZDOs.
+            OwnerEchoRuntime.Tick(now, _settings);
+            OwnerEchoRuntime.LogIfDue(now, _settings);
         }
 
         /// <summary>
