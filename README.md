@@ -85,6 +85,16 @@ Quando perceber teleporte, ações atrasadas ou dano chegando tarde, o jogador d
 
 Em PvP, todo mundo que perde uma luta marcaria um incidente. Por isso, além do limite por jogador, o servidor inicia **no máximo uma captura manual por minuto**. Um marcador acima desse limite ainda entra no `trigger` de qualquer captura que esteja aberta ou que comece naquele instante; sozinho, ele só aparece no log em nível debug.
 
+### Captura de grupo (só admin)
+
+Os incidentes mostram o que o **servidor** sabe de cada jogador e o último relatório de 1 linha/s do cliente. A captura de grupo pede mais: o próprio histórico local de cada cliente, na hora. Um admin dispara pelo atalho `GroupCapture.Shortcut` (vazio por padrão) ou por `AdaptiveNet.GroupCaptureRpc.RequestGroupCapture(int segundos)` (para o menu Deadheim > Admin chamar por reflexão). O pedido segue pelo RPC `AdaptiveNet.GroupCapture.Request.1`; **o servidor confere a lista de admin do jogo** (a mesma dos comandos de admin) e ignora quem não estiver nela, com um aviso no log.
+
+O servidor então manda `AdaptiveNet.GroupCapture.Ask.1` só aos clientes que já enviaram relatório (têm o mod) e cada um responde por `...Reply.1` com os últimos N segundos (padrão 60, máximo 120): uma amostra por segundo UTC com frame (médio/p95/máx), stalls, GC, foco, pronto/teletransporte, ping, qualidade, taxa de envio, fila, IA simulada e CPU/memória da máquina. São os mesmos campos do relatório normal, sem medição nova; o cliente só guarda as últimas 120 linhas na memória (~8 KiB).
+
+Limites: bloco deflatado de no máximo 12 KiB por cliente (se passar, descarta as amostras mais antigas); prazo de `GroupCapture.TimeoutSeconds` (8 s) para as respostas; no máximo uma captura a cada `GroupCapture.MinIntervalSeconds` (120 s) no servidor inteiro, e um cliente só responde a um pedido a cada 20 s. Tudo roda sem bloquear a thread principal; o arquivo é escrito no pool de threads e só os 30 `group-capture-*.csv` mais recentes ficam. Qualquer falha desliga só esta função, com um aviso.
+
+O resultado é `BepInEx/AdaptiveNet/incidents/group-capture-<data>.csv`. O cabeçalho (linhas `#`) resume quem respondeu (com amostras, bytes e correção de relógio), quem **não tem o mod** (`no_mod`) e quem **estourou o prazo** (`timed_out`). Depois, uma linha por jogador e por segundo UTC, ordenada por tempo. Se o relógio do cliente diverge do servidor em 2 s ou mais, a série é deslocada e a coluna `skew_s` mostra quanto. Custo de banda estimado: ~3 KiB por cliente por captura (12 KiB no pior caso), ou cerca de 100 KiB com 30 jogadores, no máximo a cada 2 min, mais 3 pacotes de ~16 bytes para pedir. Para ler junto de um incidente, junte pelas colunas de tempo UTC (`utc` aqui, `utc` nos incidentes).
+
 O overlay abre pelo atalho `Diagnostics.OverlayShortcut` (vazio por padrão desde a 0.5.4; era F8) ou, no Deadheim, em ESC > Deadheim > Admin > Painel de rede. Ele mostra FPS/frame local, quantidade de clientes reportando, maior atraso dos relatórios e o número do incidente ativo.
 
 ### Como interpretar

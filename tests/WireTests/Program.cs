@@ -318,6 +318,49 @@ Assert.True(ReferenceEquals(unrelated, SocketUnwrapper.Unwrap(unrelated)),
     "a field named Original that is not a socket is not followed");
 Assert.True(SocketUnwrapper.Unwrap(null) == null, "no socket stays no socket");
 
+// Group capture RPCs: request, ask and reply packages round-trip and hostile ones are refused.
+{
+    ZPackage request = GroupCaptureWire.WriteRequest(500);
+    request.SetPos(0);
+    Assert.True(GroupCaptureWire.TryReadRequest(request, out int requestedSeconds), "group capture request round-trips");
+    Assert.Equal(120, requestedSeconds, "a request over the maximum is clamped to 120 s");
+    var wrongProtocol = new ZPackage();
+    wrongProtocol.Write(99);
+    wrongProtocol.Write(60);
+    wrongProtocol.SetPos(0);
+    Assert.True(!GroupCaptureWire.TryReadRequest(wrongProtocol, out _), "an unknown request protocol is refused");
+
+    ZPackage ask = GroupCaptureWire.WriteAsk(7, 60);
+    ask.SetPos(0);
+    Assert.True(GroupCaptureWire.TryReadAsk(ask, out int askId, out int askSeconds), "group capture ask round-trips");
+    Assert.Equal(7, askId, "ask capture id");
+    Assert.Equal(60, askSeconds, "ask seconds");
+
+    var series = new GroupCaptureSeries();
+    for (int second = 0; second < 60; second++)
+    {
+        series.Add(GroupCaptureSample.FromReport(1000 + second, health, network, true, true, false));
+    }
+    byte[] block = GroupCaptureCodec.Encode(series.Take(1059, 60), GroupCaptureLimits.MaximumCompressedBytes, out int included);
+    ZPackage reply = GroupCaptureWire.WriteReply(7, 1_059_000L, block);
+    Assert.True(reply.Size() <= GroupCaptureLimits.MaximumReplyPackageBytes, "a reply fits the per-client ceiling");
+    reply.SetPos(0);
+    Assert.True(GroupCaptureWire.TryReadReply(reply, out int replyId, out long clientMs, out byte[] replyBlock), "group capture reply round-trips");
+    Assert.Equal(7, replyId, "reply capture id");
+    Assert.Equal(1_059_000L, clientMs, "reply client clock");
+    Assert.True(GroupCaptureCodec.TryDecode(replyBlock, out GroupCaptureSample[] decodedSeries) && decodedSeries.Length == included,
+        "the reply block decodes to the samples sent");
+    Assert.Equal(73, decodedSeries[0].PingMs, "client ping seen by the client survives the wire");
+
+    var oversized = new ZPackage();
+    oversized.Write(GroupCaptureLimits.Protocol);
+    oversized.Write(7);
+    oversized.Write(1L);
+    oversized.Write(new byte[GroupCaptureLimits.MaximumReplyPackageBytes]);
+    oversized.SetPos(0);
+    Assert.True(!GroupCaptureWire.TryReadReply(oversized, out _, out _, out _), "an oversized reply is refused");
+}
+
 System.Console.WriteLine($"Wire tests passed: {Assert.Passed}");
 
 class StubSocket : ISocket

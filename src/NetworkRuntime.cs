@@ -189,6 +189,7 @@ namespace AdaptiveNet
             SteamInterface.Initialize(log);
             PinnedSteamSender.Initialize(log);
             ClientTelemetryRpc.Initialize(log);
+            GroupCaptureRpc.Initialize(settings, log);
             PvpTelemetry.Initialize(log);
             ServerOwnershipCensus.Initialize(log);
             _ownershipDisagreement.Reset();
@@ -418,6 +419,7 @@ namespace AdaptiveNet
             if (_settingsChanged) ApplySettingChanges();
             RecheckConflictsOnce();
             ClientTelemetryRpc.EnsureRegistered();
+            GroupCaptureRpc.Tick(unscaledTime);
             if (unscaledTime < _nextSampleTime) return;
 
             _nextSampleTime = unscaledTime + Math.Max(0.25f, _settings.SampleIntervalSeconds.Value);
@@ -632,6 +634,16 @@ namespace AdaptiveNet
             context.ClientTelemetry.Accept(report, now);
         }
 
+        /// <summary>Whether this player's client has ever sent a telemetry report, that is, has the mod.</summary>
+        public static bool PeerHasReported(ZNetPeer peer)
+        {
+            if (peer?.m_socket == null) return false;
+            lock (Gate)
+            {
+                return Connections.TryGetValue(peer.m_socket, out ConnectionContext context) && context.LastClientSnapshot.EverReported;
+            }
+        }
+
         public static void ReportInvalidClientTelemetry(long sender, int protocol)
         {
             if (_settings == null || ZNet.instance == null || !ZNet.instance.IsServer()) return;
@@ -707,6 +719,7 @@ namespace AdaptiveNet
             _incidents?.Dispose();
             _incidents = null;
             ClientTelemetryRpc.Shutdown();
+            GroupCaptureRpc.Shutdown();
             PvpTelemetry.Reset();
             ServerOwnershipCensus.Reset();
             AdaptivePeerScheduler.Reset();
@@ -735,6 +748,14 @@ namespace AdaptiveNet
                 _clientPlayerReadyThroughoutWindow,
                 _clientTeleportingDuringWindow,
                 _lastClientHitUpload,
+                clientAi,
+                clientMachine);
+            GroupCaptureRpc.RecordClientSample(
+                _pendingLocalHealth,
+                network,
+                _clientFocusedThroughoutWindow,
+                _clientPlayerReadyThroughoutWindow,
+                _clientTeleportingDuringWindow,
                 clientAi,
                 clientMachine);
             _pendingLocalHealth = default;
