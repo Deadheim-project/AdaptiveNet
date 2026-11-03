@@ -79,6 +79,10 @@ namespace AdaptiveNet
         public ConfigEntry<int> PendingGrowthKiB { get; private set; }
         public ConfigEntry<float> ChurnFactor { get; private set; }
         public ConfigEntry<int> ChurnFloorPerSecond { get; private set; }
+        public ConfigEntry<float> HostSystemCpuPercent { get; private set; }
+        public ConfigEntry<float> HostStealPercent { get; private set; }
+        public ConfigEntry<int> HostProcessSaturatedMsPerSecond { get; private set; }
+        public ConfigEntry<int> HostMinSeconds { get; private set; }
 
         public static Settings Bind(ConfigFile config, ConfigSync sync)
         {
@@ -225,7 +229,15 @@ namespace AdaptiveNet
                 ChurnFactor = config.Bind("Verdict", "ZdoChurnFactor", 3f,
                     new ConfigDescription("ZDOs moved in a second (sent + received) that count as object churn when this many times the median of the previous 60 s.", new AcceptableValueRange<float>(1.5f, 50f))),
                 ChurnFloorPerSecond = config.Bind("Verdict", "ZdoChurnFloorPerSecond", 2000,
-                    new ConfigDescription("ZDOs per second below which a rise is never called churn, however large the ratio.", new AcceptableValueRange<int>(1, 1000000)))
+                    new ConfigDescription("ZDOs per second below which a rise is never called churn, however large the ratio.", new AcceptableValueRange<int>(1, 1000000))),
+                HostSystemCpuPercent = config.Bind("Verdict", "HostSystemCpuPercent", 90f,
+                    new ConfigDescription("host-cpu-starved: host CPU use (%) that counts as busy in a second when the server frame was bad and the game process used less than HostProcessSaturatedMsPerSecond.", new AcceptableValueRange<float>(50f, 100f))),
+                HostStealPercent = config.Bind("Verdict", "HostStealPercent", 10f,
+                    new ConfigDescription("host-cpu-starved: hypervisor steal time (%, Linux) that counts as an oversubscribed host by itself.", new AcceptableValueRange<float>(1f, 100f))),
+                HostProcessSaturatedMsPerSecond = config.Bind("Verdict", "HostProcessSaturatedMsPerSecond", 900,
+                    new ConfigDescription("Game process CPU (ms per second) from which it counts as saturated (about one core): game-cpu-saturated, and never host-cpu-starved.", new AcceptableValueRange<int>(100, 100000))),
+                HostMinSeconds = config.Bind("Verdict", "HostMinSeconds", 2,
+                    new ConfigDescription("Seconds of bad server frame with the host condition needed to name host-cpu-starved or game-cpu-saturated.", new AcceptableValueRange<int>(1, 60)))
             };
             return settings;
         }
@@ -246,7 +258,11 @@ namespace AdaptiveNet
                 SaturationPendingFloorBytes = SaturationPendingFloorKiB.Value * 1024,
                 PendingGrowthBytes = PendingGrowthKiB.Value * 1024,
                 ChurnFactor = ChurnFactor.Value,
-                ChurnFloorPerSecond = ChurnFloorPerSecond.Value
+                ChurnFloorPerSecond = ChurnFloorPerSecond.Value,
+                HostSystemCpuPercent = HostSystemCpuPercent.Value,
+                HostStealPercent = HostStealPercent.Value,
+                HostProcessSaturatedMsPerSecond = HostProcessSaturatedMsPerSecond.Value,
+                HostMinSeconds = HostMinSeconds.Value
             };
         }
 

@@ -201,7 +201,7 @@ Assert.Equal(75, Array.IndexOf(incidentColumns, "server_owned_nonplayer_characte
     "the incident columns from 0.4 keep their positions");
 Assert.True(IncidentTelemetry.HeaderForTesting.Contains(",client_hit_upload_max_ms,server_world_save_ms,census_creatures_near,"),
     "PvP columns keep their place and the census columns come right after them");
-Assert.True(IncidentTelemetry.HeaderForTesting.EndsWith(",client_process_memory_mib,verdict"),
+Assert.True(IncidentTelemetry.HeaderForTesting.EndsWith(",client_process_memory_mib,host_process_cpu_ms_s,host_system_cpu_pct,host_steal_pct,verdict"),
     "census and protocol 3 columns come before the verdict, which is appended last");
 string verdictRow = IncidentTelemetry.FormatForTesting(1, "pre", "wire-test", point, "server-stall [alta]: servidor travou 640 ms, 6 de 8");
 Assert.True(verdictRow.EndsWith(",\"server-stall [alta]: servidor travou 640 ms, 6 de 8\""),

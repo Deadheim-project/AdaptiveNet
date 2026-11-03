@@ -31,7 +31,8 @@ namespace AdaptiveNet
             int serverOwnedNonPlayerCharacters,
             PvpPeerStats pvp = default,
             double serverWorldSaveMilliseconds = 0d,
-            PeerCensusSample census = default)
+            PeerCensusSample census = default,
+            HostCpuSample host = default)
         {
             UtcTicks = utcTicks;
             SessionSeconds = sessionSeconds;
@@ -50,6 +51,7 @@ namespace AdaptiveNet
             Pvp = pvp;
             ServerWorldSaveMilliseconds = Math.Max(0d, serverWorldSaveMilliseconds);
             Census = census;
+            Host = host;
         }
 
         public long UtcTicks { get; }
@@ -70,6 +72,8 @@ namespace AdaptiveNet
         public double ServerWorldSaveMilliseconds { get; }
         /// <summary>Ownership census around this player (server, by sector) - not measured when default.</summary>
         public PeerCensusSample Census { get; }
+        /// <summary>Server process and host CPU - not measured when default.</summary>
+        public HostCpuSample Host { get; }
     }
 
     internal sealed class IncidentTelemetry : IDisposable
@@ -101,6 +105,8 @@ namespace AdaptiveNet
             "census_creatures_near,census_owned_by_peer,census_owned_by_server,census_unowned,census_owned_by_others," +
             "census_zdos_visited,census_scan_ms,census_age_s,census_truncated," +
             "client_ai_instances,client_ai_owned,client_ai_other,client_process_cpu_ms_s,client_system_cpu_pct,client_process_memory_mib," +
+            // Server process and host CPU (-1 = not measured), before the verdict.
+            "host_process_cpu_ms_s,host_system_cpu_pct,host_steal_pct," +
             // Incident verdict (opening, or final on the last post row), appended last.
             "verdict";
 
@@ -467,6 +473,9 @@ namespace AdaptiveNet
                 client.Machine.Measured ? F(client.Machine.ProcessCpuMsPerSecond) : "-1",
                 client.Machine.Measured ? F(client.Machine.SystemCpuPercent) : "-1",
                 Measured(client.Machine.Measured, client.Machine.ProcessMemoryMiB),
+                point.Host.Measured ? F(point.Host.ProcessCpuMsPerSecond) : "-1",
+                point.Host.Measured ? F(point.Host.SystemCpuPercent) : "-1",
+                point.Host.Measured ? F(point.Host.StealPercent) : "-1",
                 Escape(verdict));
         }
 

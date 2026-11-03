@@ -122,6 +122,11 @@ Só usa o que o servidor já tem, sem mudar o protocolo do relatório do cliente
 | `client-loading` / `client-teleporting` | O cliente reportou não estar pronto, ou estar teleportando. Antes eram só silenciados; agora entram no veredito, sem abrir captura por conta própria. |
 | `zdo-churn` | ZDOs enviados + recebidos no segundo (contadores baratos do `ZDOMan`; o mod nunca varre os ZDOs) >= `ZdoChurnFactor` x a mediana dos 60 s anteriores e acima de `ZdoChurnFloorPerSecond`. |
 
+| `host-cpu-starved` | Nos segundos de frame ruim do servidor (média >= limiar de sobrecarga ou frame >= `SevereFrameStallThresholdMs`), o host estava sem CPU: sistema >= `HostSystemCpuPercent` (90%) com o processo abaixo de `HostProcessSaturatedMsPerSecond`, ou steal >= `HostStealPercent` (10%). Precisa de `HostMinSeconds` segundos. Confiança alta com steal. "Sistema a X% enquanto o processo usa só Y ms/s". |
+| `game-cpu-saturated` | Os mesmos segundos ruins, mas o processo do jogo usa >= `HostProcessSaturatedMsPerSecond` (cerca de 1 núcleo): o gargalo é o próprio jogo, não o host. |
+
+CPU do host (servidor): 1 amostra por segundo, `Process.TotalProcessorTime` (ms/s) e CPU total do sistema, via `/proc/stat` no Linux (também steal) ou `GetSystemTimes` no Windows. Sai no CSV de incidentes (`host_process_cpu_ms_s`, `host_system_cpu_pct`, `host_steal_pct`; -1 = não medido, logo antes de `verdict`) e na linha de log de 15 s (`hostCpu=proc ... sysMax ... stealMax ...`). Em contêiner, `/proc/stat` mostra o host inteiro, não o limite do contêiner.
+
 As causas de jogador (`link-saturated`, `bad-connection`, `client-*`) valem para quem disparou o incidente; num marcador manual ou gatilho de servidor, para todos os conectados. Fora do veredito: detalhe de CPU/GPU do cliente, que exigiria protocolo novo.
 
 ### Quem simula os mobs (censo de donos, protocolo 3)
