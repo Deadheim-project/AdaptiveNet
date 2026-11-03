@@ -304,6 +304,24 @@ AdaptiveControllerOptions StandardOptions()
     Test.Equal(200L, merged.ManagedMemoryBytes, "health merge keeps newest memory sample");
 }
 
+// The periodic log line folds every one-second sample of its 15-second interval; printing only
+// the last one showed a 345 ms world save as localFrameMax=33ms.
+{
+    RuntimeHealthSample interval = default;
+    for (int second = 0; second < 15; second++)
+    {
+        bool save = second == 6;
+        interval = RuntimeHealthSample.Merge(interval, new RuntimeHealthSample(
+            1d, save ? 20 : 30, save ? 50d : 33.3d, 34d, save ? 345d : 34d, save ? 1 : 0, 0, 0, 0, 0, 0d, 1000L));
+    }
+    Test.Near(345d, interval.MaximumFrameMilliseconds, 0.001d,
+        "a stall in the middle of the interval reaches the log line");
+    Test.Near(15d, interval.IntervalSeconds, 0.001d, "the interval spans every sample");
+    Test.Equal(440, interval.FrameCount, "every frame of the interval is counted");
+    Test.Near(29.36d, interval.AverageFps, 0.01d, "fps is frame-weighted over the whole interval");
+    Test.Equal(1, interval.StallFrames, "the stalled frame is counted once");
+}
+
 Test.Summary();
 
 static class Test

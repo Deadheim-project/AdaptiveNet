@@ -121,7 +121,7 @@ No Valheim, o atacante acerta onde ele vê a vítima, e o bloqueio/parry é deci
 
 As medidas vêm do caminho de envio do próprio Valheim. Por isso funcionam igual com o escalonador ligado ou com `Mode = ObserveOnly`, o que permite comparar os dois com os mesmos jogadores. Elas só observam: nada muda no que o jogo envia, e uma falha desliga as medidas com um aviso, sem afetar a rede. O relatório cliente→servidor passou ao protocolo 2 na 0.5.0; servidor e launcher precisam estar sempre na mesma versão (0.5.1 ou posterior).
 
-Na linha periódica do log, `n` e `max` cobrem todo o intervalo do log; o `p95` é o pior p95 de um segundo dentro dele.
+Na linha periódica do log, `n` e `max` cobrem todo o intervalo do log; o `p95` é o pior p95 de um segundo dentro dele. O mesmo vale para `queueMax`, `localFrameMax`, `clientFrameMax` e `reportDelayMax`, e `localFps` é a média do intervalo inteiro. Até a 0.5.3 esses cinco mostravam só o último segundo antes da linha, e um save de 345 ms aparecia como `localFrameMax=33ms`.
 
 ## Preset para 30 jogadores
 
@@ -137,6 +137,8 @@ O arquivo `config\Detalhes.AdaptiveNet.cfg` do repositório — e `BepInEx\confi
 | `Scheduler.SoloPeerIntervalMs` | `250` | Reserva 4 Hz para jogadores espalhados e libera orçamento para o grupo. |
 | `Scheduler.MaximumPeersPerFrame` | `12` | Evita uma rajada grande em um único frame. |
 | `Scheduler.CpuBudgetMs` | `0.75` | Limite de CPU do escalonador por frame. |
+| `Sync.DistantPlayerSync` | `true` | Só no servidor. Envia sempre os personagens dos outros jogadores dentro do raio, mesmo com 10 ou mais objetos próximos pendentes (o vanilla pula as zonas distantes nesse caso). Mede-se pelo `relayHold` e pelos avisos `relay hold`; desligue para voltar ao vanilla. |
+| `Sync.DistantPlayerSyncRadiusMeters` | `160` | Raio, em metros, do envio garantido acima. |
 | `ZDO.MaximumQueueBudgetKiB` | `16` | Teto por atendimento para a primeira rodada de medição com carga real. Com `MaximumPeersPerFrame = 12`, um valor de 48 permitia rajadas de até ~576 KiB num único frame do scheduler (57x o vanilla); suba em passos pequenos só depois de confirmar `queue_max_ms` baixo. |
 
 Um grupo de 2, 8, 10, 12 ou mais jogadores é reconhecido automaticamente. O valor `12` em `MaximumPeersPerFrame` é apenas o teto de tentativas em cada frame, não um limite para o grupo.

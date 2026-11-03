@@ -42,6 +42,8 @@ namespace AdaptiveNet
         public ConfigEntry<int> ClientToServerIntervalMs { get; private set; }
         public ConfigEntry<int> MaximumPeersPerFrame { get; private set; }
         public ConfigEntry<float> SchedulerCpuBudgetMs { get; private set; }
+        public ConfigEntry<bool> DistantPlayerSync { get; private set; }
+        public ConfigEntry<int> DistantPlayerSyncRadiusMeters { get; private set; }
         public ConfigEntry<KeyCode> OverlayKey { get; private set; }
         public ConfigEntry<KeyCode> IncidentMarkerKey { get; private set; }
         public ConfigEntry<float> LogIntervalSeconds { get; private set; }
@@ -131,6 +133,10 @@ namespace AdaptiveNet
                     new ConfigDescription("Hard cap on peer send attempts in one frame.", new AcceptableValueRange<int>(1, 64)))),
                 SchedulerCpuBudgetMs = Synced(config.Bind("Scheduler", "CpuBudgetMs", 0.75f,
                     new ConfigDescription("Main-thread time budget for peer send attempts per frame.", new AcceptableValueRange<float>(0.1f, 20f)))),
+                DistantPlayerSync = Synced(config.Bind("Sync", "DistantPlayerSync", true,
+                    "Server only: always send the other players' characters inside the radius below, even when the receiver has ten or more nearby objects pending. Vanilla skips the distant zones then, so an enemy 70-150 m away can freeze on screen for many seconds in a busy base.")),
+                DistantPlayerSyncRadiusMeters = Synced(config.Bind("Sync", "DistantPlayerSyncRadiusMeters", 160,
+                    new ConfigDescription("Players inside this distance from the receiver are always synced.", new AcceptableValueRange<int>(20, 1000)))),
                 // 0.5.4: no key by default; Deadheim opens both from ESC > Deadheim > Admin. Renamed
                 // (OverlayKey = F8, IncidentMarkerKey = F9) so the keys already in an existing cfg do not come back.
                 OverlayKey = config.Bind("Diagnostics", "OverlayShortcut", KeyCode.None,

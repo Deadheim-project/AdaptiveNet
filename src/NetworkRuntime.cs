@@ -160,9 +160,15 @@ namespace AdaptiveNet
         private static double _logServiceGapMaximumMs;
         private static int _logZdoQueueRefusals;
         private static double _logWorldSaveMaximumMs;
+        private static RuntimeHealthSample _logLocalHealth;
+        private static double _logQueueDelayMaximumMs;
+        private static double _logClientFrameMaximumMs;
+        private static double _logClientReportDelayMaximumMs;
 
         public static bool IsActive => _active;
         public static bool SchedulerEnabled => _settings != null && _settings.AdaptivePeerScheduler.Value;
+        public static bool DistantPlayerSyncEnabled => _settings != null && _settings.DistantPlayerSync.Value;
+        public static int DistantPlayerSyncRadiusMeters => _settings?.DistantPlayerSyncRadiusMeters.Value ?? 0;
         public static bool PinnedSteamSendEnabled => _settings != null && _settings.PinnedSteamSend.Value;
         public static DiagnosticsSnapshot Snapshot => _snapshot;
 
@@ -209,6 +215,7 @@ namespace AdaptiveNet
             _logServiceGapMaximumMs = 0d;
             _logZdoQueueRefusals = 0;
             _logWorldSaveMaximumMs = 0d;
+            ResetHealthForLog();
 
             SyncCsvTelemetry();
 
@@ -561,6 +568,7 @@ namespace AdaptiveNet
 
             _snapshot = BuildSnapshot(samples, intervalHealth, unscaledTime, isServer, pvp);
             AccumulatePvpForLog(_snapshot);
+            AccumulateHealthForLog(intervalHealth, _snapshot);
             DiagnosticsOverlay.SetSnapshot(_snapshot);
             _csv?.Write(unscaledTime, _snapshot);
             LogAggregateIfDue(unscaledTime);
@@ -650,6 +658,13 @@ namespace AdaptiveNet
             if (_log == null) return;
             if (applied) _log.LogInfo(message);
             else _log.LogWarning(message);
+        }
+
+        public static void ReportDistantPlayerSyncFault(Exception exception)
+        {
+            _log?.LogWarning(
+                $"Distant player sync disabled safely after it failed: {exception.GetType().Name}: {exception.Message}. " +
+                "Networking is unaffected.");
         }
 
         public static void Shutdown()
@@ -1154,20 +1169,22 @@ namespace AdaptiveNet
             if (_snapshot.PeerCount <= 0)
             {
                 FormatPvpSummaryAndReset(_snapshot);
+                ResetHealthForLog();
                 return;
             }
             _log.LogInfo(
                 $"telemetry peers={_snapshot.PeerCount}, networkSamples={_snapshot.NetworkSamplePeers}, ping(avg/p95)={_snapshot.AveragePingMs:F0}/{_snapshot.P95PingMs:F0}ms, " +
-                $"queued={_snapshot.TotalQueuedBytes / 1024d:F1}KiB, queueMax={_snapshot.MaximumQueueDelayMs:F1}ms, " +
+                $"queued={_snapshot.TotalQueuedBytes / 1024d:F1}KiB, queueMax={_logQueueDelayMaximumMs:F1}ms, " +
                 $"sendRate(avg/min)={_snapshot.AverageTransportRateKiB:F0}/{_snapshot.MinimumTransportRateKiB:F0}KiB/s, " +
                 $"rateCapAvg={_snapshot.AverageRateLimitKiB:F0}KiB/s, zdoAvg={_snapshot.AverageZdoBudgetKiB:F1}KiB, " +
                 $"congested={_snapshot.CongestedPeers}, grouped={_snapshot.GroupedPeers}, " +
-                $"localFps={_snapshot.LocalAverageFps:F0}, localFrameMax={_snapshot.LocalMaximumFrameMs:F0}ms, " +
+                $"localFps={_logLocalHealth.AverageFps:F0}, localFrameMax={_logLocalHealth.MaximumFrameMilliseconds:F0}ms, " +
                 $"clientReports={_snapshot.ClientTelemetryPeers}/{_snapshot.PeerCount}, missing={_snapshot.MissingClientReports}, " +
-                $"clientFrameMax={_snapshot.MaximumClientFrameMs:F0}ms, reportDelayMax={_snapshot.MaximumClientReportDelayMs:F0}ms, " +
+                $"clientFrameMax={_logClientFrameMaximumMs:F0}ms, reportDelayMax={_logClientReportDelayMaximumMs:F0}ms, " +
                 $"mobs={_snapshot.ActiveNonPlayerCharacters}, incident={_snapshot.ActiveIncidentId}, " +
                 $"sched={_snapshot.SchedulerAttemptsPerSecond:F0}/s, budgetStops={_snapshot.SchedulerBudgetStopsPerSecond}/s" +
                 FormatPvpSummaryAndReset(_snapshot));
+            ResetHealthForLog();
         }
 
         /// <summary>
@@ -1182,6 +1199,27 @@ namespace AdaptiveNet
             _logServiceGapMaximumMs = Math.Max(_logServiceGapMaximumMs, snapshot.ServiceGapMaximumMs);
             _logZdoQueueRefusals += snapshot.ZdoQueueRefusals;
             _logWorldSaveMaximumMs = Math.Max(_logWorldSaveMaximumMs, snapshot.WorldSaveMs);
+        }
+
+        /// <summary>
+        /// The same folding for the frame and delay maxima of the periodic log line. Printed from
+        /// the snapshot they covered one second of the interval, so a 345 ms world save showed as
+        /// localFrameMax=33ms. localFps becomes the frame-weighted average of the whole interval.
+        /// </summary>
+        private static void AccumulateHealthForLog(RuntimeHealthSample localHealth, DiagnosticsSnapshot snapshot)
+        {
+            _logLocalHealth = RuntimeHealthSample.Merge(_logLocalHealth, localHealth);
+            _logQueueDelayMaximumMs = Math.Max(_logQueueDelayMaximumMs, snapshot.MaximumQueueDelayMs);
+            _logClientFrameMaximumMs = Math.Max(_logClientFrameMaximumMs, snapshot.MaximumClientFrameMs);
+            _logClientReportDelayMaximumMs = Math.Max(_logClientReportDelayMaximumMs, snapshot.MaximumClientReportDelayMs);
+        }
+
+        private static void ResetHealthForLog()
+        {
+            _logLocalHealth = default;
+            _logQueueDelayMaximumMs = 0d;
+            _logClientFrameMaximumMs = 0d;
+            _logClientReportDelayMaximumMs = 0d;
         }
 
         /// <summary>
