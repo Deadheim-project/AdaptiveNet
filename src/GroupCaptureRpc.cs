@@ -36,7 +36,8 @@ namespace AdaptiveNet
             try
             {
                 if (package.ReadInt() != GroupCaptureLimits.Protocol) return false;
-                seconds = GroupCaptureLimits.ClampSeconds(package.ReadInt());
+                int requested = package.ReadInt();
+                seconds = requested <= 0 ? 0 : GroupCaptureLimits.ClampSeconds(requested);
                 return true;
             }
             catch
@@ -191,7 +192,7 @@ namespace AdaptiveNet
             RuntimeHealthSample health, NetworkSample network, bool focused, bool playerReady, bool teleporting,
             ClientAiSample ai, ClientMachineSample machine)
         {
-            if (_disabled) return;
+            if (_disabled || _settings == null || !_settings.GroupCapture.Value) return;
             try
             {
                 ClientSeries.Add(GroupCaptureSample.FromReport(
@@ -339,8 +340,8 @@ namespace AdaptiveNet
                 }
                 catch (Exception exception)
                 {
-                    _disabled = true;
-                    log?.LogWarning($"Group capture disabled safely: could not write {path}: {exception.GetType().Name}: {exception.Message}");
+                    // Falha de escrita costuma ser passageira (disco ocupado): so esta captura se perde.
+                    log?.LogWarning($"Group capture file not written ({path}): {exception.GetType().Name}: {exception.Message}");
                 }
             });
         }

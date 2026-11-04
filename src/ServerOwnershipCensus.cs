@@ -18,6 +18,7 @@ namespace AdaptiveNet
     internal static class ServerOwnershipCensus
     {
         private const int ConsecutiveSlowScansToDisable = 3;
+        private const double SlowScanPauseSeconds = 300d;
 
         private static readonly Dictionary<int, bool> CreaturePrefabs = new Dictionary<int, bool>();
         private static readonly Dictionary<long, PeerCensusSample> Samples = new Dictionary<long, PeerCensusSample>();
@@ -29,6 +30,7 @@ namespace AdaptiveNet
         private static ManualLogSource _log;
         private static bool _disabled;
         private static int _slowScans;
+        private static double _pausedUntil;
         private static double _nextLogTime;
         private static int _logScans;
         private static double _logCostTotalMs;
@@ -64,6 +66,7 @@ namespace AdaptiveNet
             CharacterOwnershipTelemetry.Reset();
             _disabled = false;
             _slowScans = 0;
+            _pausedUntil = 0d;
             _nextLogTime = 0d;
             ResetLog();
         }
@@ -83,7 +86,7 @@ namespace AdaptiveNet
         /// <summary>Chamado a cada amostra do servidor; faz no maximo UMA varredura de um jogador.</summary>
         public static void Tick(double now, Settings settings)
         {
-            if (_disabled || _sectorField == null || settings == null || !settings.OwnerCensus.Value) return;
+            if (_disabled || _sectorField == null || settings == null || !settings.OwnerCensus.Value || now < _pausedUntil) return;
             ZNet net = ZNet.instance;
             ZDOMan manager = ZDOMan.instance;
             if (net == null || manager == null || ZNetScene.instance == null) return;
@@ -120,9 +123,13 @@ namespace AdaptiveNet
                     else _slowScans = 0;
                     if (_slowScans >= ConsecutiveSlowScansToDisable)
                     {
-                        Disable(ConsecutiveSlowScansToDisable + " consecutive scans above " +
-                                settings.OwnerCensusMaxScanMs.Value.ToString("F0") + " ms (last " + cost.ToString("F1") +
-                                " ms); lower OwnerCensusZoneRadius");
+                        // Pausa em vez de desligar: uma pausa do GC ou do save conta como varredura lenta.
+                        _slowScans = 0;
+                        _pausedUntil = now + SlowScanPauseSeconds;
+                        _log?.LogWarning(
+                            "Ownership census paused " + SlowScanPauseSeconds.ToString("F0") + " s: " + ConsecutiveSlowScansToDisable +
+                            " consecutive scans above " + settings.OwnerCensusMaxScanMs.Value.ToString("F0") + " ms (last " +
+                            cost.ToString("F1") + " ms); lower OwnerCensusZoneRadius if it repeats.");
                         return;
                     }
                 }
@@ -225,7 +232,11 @@ namespace AdaptiveNet
             }
             Clock.Stop();
             // Para o eco ao dono: quantas criaturas cada dono simula perto deste jogador.
-            foreach (KeyValuePair<long, int> pair in ScanOwners) OwnerEchoRuntime.RecordNear(pair.Key, peer.m_uid, pair.Value, now);
+            // Varredura truncada subconta as criaturas (as pecas de uma base vem antes): nao entra no ranking do eco.
+            if (!truncated)
+            {
+                foreach (KeyValuePair<long, int> pair in ScanOwners) OwnerEchoRuntime.RecordNear(pair.Key, peer.m_uid, pair.Value, now);
+            }
             double costMs = Clock.Elapsed.TotalMilliseconds;
             Samples[peer.m_uid] = new PeerCensusSample(creatures, byPeer, byServer, unowned, visited, costMs, 0d, truncated);
             SampleTimes[peer.m_uid] = now;

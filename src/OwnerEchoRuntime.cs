@@ -243,6 +243,9 @@ namespace AdaptiveNet
             ZNet net = ZNet.instance;
             ZRoutedRpc routed = ZRoutedRpc.instance;
             if (net == null || routed == null || net.IsServer()) return;
+            // So o servidor mede o eco; outro cliente nao pode usar este RPC para fazer o jogador responder.
+            long serverId = net.GetServerPeer()?.m_uid ?? 0L;
+            if (serverId == 0L || sender != serverId) return;
             if (!OwnerEchoWire.TryRead(package, out long sequence)) return;
             try
             {

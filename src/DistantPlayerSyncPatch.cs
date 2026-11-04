@@ -58,6 +58,7 @@ namespace AdaptiveNet
             Vector3 origin = receiver.GetRefPos();
             float radiusSquared = (float)radiusMeters * radiusMeters;
             List<ZNetPeer> peers = net.GetPeers();
+            List<ZDO> missing = null;
             for (int index = 0; index < peers.Count; index++)
             {
                 ZNetPeer source = peers[index];
@@ -67,8 +68,11 @@ namespace AdaptiveNet
                 ZDO zdo = manager.GetZDO(character);
                 if (zdo == null || (zdo.GetPosition() - origin).sqrMagnitude > radiusSquared) continue;
                 if (!NeedsSend(zdoPeer, zdo) || toSync.Contains(zdo)) continue;
-                toSync.Insert(0, zdo);
+                if (missing == null) missing = new List<ZDO>(4);
+                missing.Add(zdo);
             }
+            // Um unico deslocamento da lista, no lugar de um Insert(0) por jogador.
+            if (missing != null) toSync.InsertRange(0, missing);
         }
 
         /// <summary>The same test as ZDOPeer.ShouldSend, minus the owner revision (a player's character rarely changes owner).</summary>

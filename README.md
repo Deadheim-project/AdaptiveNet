@@ -137,7 +137,7 @@ Só usa o que o servidor já tem, sem mudar o protocolo do relatório do cliente
 
 CPU do host (servidor): 1 amostra por segundo, `Process.TotalProcessorTime` (ms/s) e CPU total do sistema, via `/proc/stat` no Linux (também steal) ou `GetSystemTimes` no Windows. Sai no CSV de incidentes (`host_process_cpu_ms_s`, `host_system_cpu_pct`, `host_steal_pct`; -1 = não medido, logo antes de `verdict`) e na linha de log de 15 s (`hostCpu=proc ... sysMax ... stealMax ...`). Em contêiner, `/proc/stat` mostra o host inteiro, não o limite do contêiner.
 
-As causas de jogador (`link-saturated`, `bad-connection`, `client-*`) valem para quem disparou o incidente; num marcador manual ou gatilho de servidor, para todos os conectados. Fora do veredito: detalhe de CPU/GPU do cliente, que exigiria protocolo novo.
+As causas de jogador (`link-saturated`, `bad-connection`, `client-*`) valem para quem disparou o incidente; num marcador manual ou gatilho de servidor, para todos os conectados. O relatório do cliente em protocolo 3 (a partir da 0.6.0; servidor e launcher precisam ser da mesma versão) traz CPU do processo e do sistema e memória, usados nos CSVs e na captura de grupo; o veredito ainda não os usa.
 
 ### Quem simula os mobs (censo de donos, protocolo 3)
 
