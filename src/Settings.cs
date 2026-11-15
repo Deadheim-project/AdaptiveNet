@@ -31,6 +31,7 @@ namespace AdaptiveNet
         public ConfigEntry<int> PingInflationThresholdMs { get; private set; }
         public ConfigEntry<int> MinimumZdoQueueBudgetKiB { get; private set; }
         public ConfigEntry<int> MaximumZdoQueueBudgetKiB { get; private set; }
+        public ConfigEntry<bool> IgnoreUnackedBytesInZdoGuard { get; private set; }
         public ConfigEntry<int> MinimumSteamSendBufferKiB { get; private set; }
         public ConfigEntry<int> MaximumSteamSendBufferKiB { get; private set; }
         public ConfigEntry<int> NagleTimeMicroseconds { get; private set; }
@@ -141,8 +142,10 @@ namespace AdaptiveNet
                     new ConfigDescription("Busy-connection ping increase over baseline that triggers backoff.", new AcceptableValueRange<int>(5, 500)))),
                 MinimumZdoQueueBudgetKiB = Synced(config.Bind("ZDO", "MinimumQueueBudgetKiB", 10,
                     new ConfigDescription("Conservative floor; 10 KiB is Valheim's vanilla value.", new AcceptableValueRange<int>(10, 1024)))),
-                MaximumZdoQueueBudgetKiB = Synced(config.Bind("ZDO", "MaximumQueueBudgetKiB", 16,
+                MaximumZdoQueueBudgetKiB = Synced(config.Bind("ZDO", "MaximumQueueBudgetKiB", 32,
                     new ConfigDescription("Hard upper bound for queued ZDO data per peer.", new AcceptableValueRange<int>(10, 4096)))),
+                IgnoreUnackedBytesInZdoGuard = Synced(config.Bind("ZDO", "IgnoreUnackedBytesInZdoGuard", true,
+                    new ConfigDescription("Do not count sent-but-unacknowledged bytes against the ZDO queue budget (they only reflect ping, not congestion). Fixes high-ping players being throttled to budget/RTT. Disable to restore the previous guard."))),
                 MinimumSteamSendBufferKiB = Synced(config.Bind("Steam", "MinimumSendBufferKiB", 128,
                     new ConfigDescription("Minimum Steam reliable-send buffer.", new AcceptableValueRange<int>(64, 65536)))),
                 MaximumSteamSendBufferKiB = Synced(config.Bind("Steam", "MaximumSendBufferKiB", 2048,
