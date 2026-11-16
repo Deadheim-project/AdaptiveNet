@@ -36,9 +36,8 @@ namespace AdaptiveNet
             int pendingReliableBytes = Math.Max(0, status.m_cbPendingReliable);
             int pendingUnreliableBytes = Math.Max(0, status.m_cbPendingUnreliable);
             int unackedBytes = Math.Max(0, status.m_cbSentUnackedReliable);
-            double queueDelayMilliseconds = Math.Max(
-                0d,
-                status.m_usecQueueTime.m_SteamNetworkingMicroseconds / 1000d);
+            double queueDelayMilliseconds = QueueDelayReading.FromMicroseconds(
+                status.m_usecQueueTime.m_SteamNetworkingMicroseconds);
 
             sample = new NetworkSample(
                 true,
@@ -86,7 +85,7 @@ namespace AdaptiveNet
                 managedQueueBytes += packet?.Length ?? 0;
             }
 
-            double steamQueueMilliseconds = Math.Max(0d, status.m_usecQueueTime.m_SteamNetworkingMicroseconds / 1000d);
+            double steamQueueMilliseconds = QueueDelayReading.FromMicroseconds(status.m_usecQueueTime.m_SteamNetworkingMicroseconds);
             double managedQueueMilliseconds = managedQueueBytes * 1000d / Math.Max(1, status.m_nSendRateBytesPerSecond);
             waitMilliseconds = steamQueueMilliseconds + managedQueueMilliseconds;
             return true;

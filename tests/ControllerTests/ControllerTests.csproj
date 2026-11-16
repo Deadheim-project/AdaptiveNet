@@ -15,5 +15,6 @@
     <Compile Include="..\..\src\OwnershipCensusCore.cs" Link="OwnershipCensusCore.cs" />
     <Compile Include="..\..\src\OwnerEchoCore.cs" Link="OwnerEchoCore.cs" />
     <Compile Include="..\..\src\HostCpu.cs" Link="HostCpu.cs" />
+    <Compile Include="..\..\src\ZdoDrainWindow.cs" Link="ZdoDrainWindow.cs" />
   </ItemGroup>
 </Project>

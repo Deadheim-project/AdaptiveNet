@@ -8,7 +8,7 @@ param(
     [string]$ConfigPath,
 
     [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')]
-    [string]$ExpectedVersion = '0.6.1',
+    [string]$ExpectedVersion = '0.6.2',
 
     [switch]$ReplaceConfig
 )

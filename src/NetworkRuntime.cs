@@ -36,6 +36,7 @@ namespace AdaptiveNet
         public CircularHistory<PeerTelemetryPoint> History { get; set; }
         public RemoteClientTelemetryState ClientTelemetry { get; } = new RemoteClientTelemetryState();
         public AdaptiveDecision Decision { get; set; }
+        public ZdoDrainWindow DrainWindow { get; } = new ZdoDrainWindow();
         public NetworkSample LastSample { get; set; }
         public RemoteClientTelemetrySnapshot LastClientSnapshot { get; set; }
         public int LastAppliedRate { get; set; }
@@ -107,7 +108,6 @@ namespace AdaptiveNet
     internal static class NetworkRuntime
     {
         public const int VanillaZdoQueueBudgetBytes = 10 * 1024;
-        public const int MaximumUnackedAllowanceBytes = 64 * 1024;
         // ZSteamSocket.RegisterGlobalCallbacks sets SendRateMin = SendRateMax = 153600.
         private const int VanillaSteamSendRateKiB = 150;
         private const double ManualMarkerIntervalSeconds = 30d;
@@ -690,16 +690,17 @@ namespace AdaptiveNet
                     return VanillaZdoQueueBudgetBytes;
                 }
 
-                int budget = Math.Max(VanillaZdoQueueBudgetBytes, context.Decision.ZdoQueueBudgetBytes);
-                // The guard compares against GetSendQueueSize, which also counts reliable bytes
-                // already sent and waiting for the ACK (one RTT's worth). At 225-250 ms ping that
-                // alone fills the budget and caps the link at budget/RTT. Adding the measured
-                // unacked bytes (capped) makes the guard effectively look at pending bytes only.
-                if (_settings != null && _settings.IgnoreUnackedBytesInZdoGuard.Value)
+                // ServerCharacters/ServerSync disconnect a peer whose send queue stays above 20000
+                // bytes for 30 s while they push a profile/config. A budget above that must not
+                // hold the queue there: after DrainWindow.HoldSeconds above ~19 KiB, refuse ZDOs
+                // (vanilla 10 KiB budget) until the queue falls below ~15 KiB.
+                if (context.DrainWindow.Observe(
+                        netPeer.m_socket.GetSendQueueSize(), Time.realtimeSinceStartupAsDouble))
                 {
-                    budget += Math.Min(context.LastSample.UnackedBytes, MaximumUnackedAllowanceBytes);
+                    return VanillaZdoQueueBudgetBytes;
                 }
-                return budget;
+
+                return Math.Max(VanillaZdoQueueBudgetBytes, context.Decision.ZdoQueueBudgetBytes);
             }
         }
 

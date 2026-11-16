@@ -1036,6 +1036,27 @@ static VerdictCause? Find(IReadOnlyList<VerdictCause> causes, string code, strin
     Test.True(!Has(IncidentVerdict.Evaluate(new List<VerdictPeerInput>(), one, vo), "host-cpu-starved"), "um segundo so nao chega a HostMinSeconds");
 }
 
+{
+    var drain = new ZdoDrainWindow();
+    Test.True(!drain.Observe(10 * 1024, 0d), "drenagem: fila baixa nao drena");
+    Test.True(!drain.Observe(25 * 1024, 1d), "drenagem: acima do limite mas sem esperar o tempo");
+    Test.True(!drain.Observe(25 * 1024, 5.9d), "drenagem: 4,9 s acima ainda nao drena");
+    Test.True(drain.Observe(25 * 1024, 6d), "drenagem: 5 s acima comeca a drenar");
+    Test.True(drain.Observe(17 * 1024, 7d), "drenagem: continua recusando ate cair de 15 KiB");
+    Test.True(!drain.Observe(14 * 1024, 8d), "drenagem: libera abaixo de 15 KiB");
+    Test.True(!drain.Observe(25 * 1024, 9d), "drenagem: contagem recomeca depois de liberar");
+
+    var dip = new ZdoDrainWindow();
+    dip.Observe(25 * 1024, 0d);
+    dip.Observe(5 * 1024, 3d);
+    Test.True(!dip.Observe(25 * 1024, 6d), "drenagem: queda abaixo do limite zera a contagem");
+
+    Test.Near(0d, QueueDelayReading.FromMicroseconds(long.MaxValue), 0d, "fila: sentinela INT64_MAX vira 0");
+    Test.Near(0d, QueueDelayReading.FromMicroseconds(-5), 0d, "fila: negativo vira 0");
+    Test.Near(0d, QueueDelayReading.FromMicroseconds(61_000_000), 0d, "fila: acima de 60 s vira 0");
+    Test.Near(250d, QueueDelayReading.FromMicroseconds(250_000), 0.001d, "fila: leitura normal preservada");
+}
+
 Test.Summary();
 
 sealed class FakeCpuReader : ICpuTimesReader

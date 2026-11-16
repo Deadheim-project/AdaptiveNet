@@ -187,8 +187,7 @@ O arquivo `config\Detalhes.AdaptiveNet.cfg` do repositório — e `BepInEx\confi
 | `Scheduler.CpuBudgetMs` | `0.75` | Limite de CPU do escalonador por frame. |
 | `Sync.DistantPlayerSync` | `true` | Só no servidor. Envia sempre os personagens dos outros jogadores dentro do raio, mesmo com 10 ou mais objetos próximos pendentes (o vanilla pula as zonas distantes nesse caso). Mede-se pelo `relayHold` e pelos avisos `relay hold`; desligue para voltar ao vanilla. |
 | `Sync.DistantPlayerSyncRadiusMeters` | `160` | Raio, em metros, do envio garantido acima. |
-| `ZDO.MaximumQueueBudgetKiB` | `32` | Teto por atendimento (era 16 até a 0.6.0; 16 prendia jogadores de ping alto a orçamento/RTT). Com `MaximumPeersPerFrame = 12`, um valor de 48 permitia rajadas de até ~576 KiB num único frame do scheduler (57x o vanilla); suba em passos pequenos só depois de confirmar `queue_max_ms` baixo. |
-| `ZDO.IgnoreUnackedBytesInZdoGuard` | `true` | O guard de fila do `SendZDOs` deixa de contar bytes enviados e ainda sem ACK (refletem o ping, não congestionamento): orçamento efetivo = orçamento + unacked medido (até 64 KiB). Desligue para o guard anterior. |
+| `ZDO.MaximumQueueBudgetKiB` | `16` | Teto por atendimento. Acima de ~19 KiB por mais de 5 s a fila entra em janela de drenagem (ZDO recusado até cair de 15 KiB): o ServerCharacters desconecta quem fica com a fila acima de 20000 bytes por 30 s. 32 KiB (0.6.1) causou kicks. |
 
 Um grupo de 2, 8, 10, 12 ou mais jogadores é reconhecido automaticamente. O valor `12` em `MaximumPeersPerFrame` é apenas o teto de tentativas em cada frame, não um limite para o grupo.
 
