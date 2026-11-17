@@ -143,6 +143,8 @@ namespace AdaptiveNet
                     new ConfigDescription("Conservative floor; 10 KiB is Valheim's vanilla value.", new AcceptableValueRange<int>(10, 1024)))),
                 MaximumZdoQueueBudgetKiB = Synced(config.Bind("ZDO", "MaximumQueueBudgetKiB", 16,
                     new ConfigDescription("Hard upper bound for queued ZDO data per peer.", new AcceptableValueRange<int>(10, 4096)))),
+                MinimumSteamSendBufferKiB = Synced(config.Bind("Steam", "MinimumSendBufferKiB", 128,
+                    new ConfigDescription("Minimum Steam reliable-send buffer.", new AcceptableValueRange<int>(64, 65536)))),
                 MaximumSteamSendBufferKiB = Synced(config.Bind("Steam", "MaximumSendBufferKiB", 2048,
                     new ConfigDescription("Hard cap for the adaptive Steam send buffer.", new AcceptableValueRange<int>(128, 262144)))),
                 NagleTimeMicroseconds = Synced(config.Bind("Steam", "NagleTimeMicroseconds", 2500,

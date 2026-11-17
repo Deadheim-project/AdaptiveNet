@@ -11,7 +11,7 @@ namespace AdaptiveNet
     {
         public const string PluginGuid = "Detalhes.AdaptiveNet";
         public const string PluginName = "AdaptiveNet";
-        public const string PluginVersion = "0.6.2";
+        public const string PluginVersion = "0.6.3";
 
         private Harmony _harmony;
         private Settings _settings;
